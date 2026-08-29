@@ -5,7 +5,7 @@
   "description": "调用本地 SBV2 推理服务合成日文语音的 TTS 插件",
   "author": {
     "name": "ggsfly",
-    "url": ""
+    "url": "https://github.com/ggsfly"
   },
   "license": "GPL-3.0-or-later",
   "urls": {

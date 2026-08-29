@@ -2,26 +2,27 @@
 
 MaiBot 的文本转语音插件，调用本地 SBV2 推理服务合成日文语音。SBV2 是日文推理模型，因此插件会先把输入文本翻译为日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
 
-> **v1.0.0** — 基于 MaiBot SDK 2.x（`MaiBotPlugin` + `@Action` / `@Command` + Pydantic 配置）。
+> **v1.0.0** — 基于 MaiBot SDK 2.x（`MaiBotPlugin` + `@Tool` / `@Command` + Pydantic 配置）。
 
 ## 前置条件
 
-本插件不内置、也不自动管理 SBV2 推理服务进程，需要你**手动启动**本地推理服务：
+本插件不内置、也不自动管理 SBV2 推理服务进程，需要你**自行部署并手动启动**本地推理服务：
 
-1. 启动 SBV2 API 服务：
+1. 准备 SBV2 推理服务（需自带 `sbv2_api.exe` 与 `Bert/` 目录下的 `deberta.onnx` + `tokenizer.json`，以及 `Model/` 目录下的说话人模型文件）。
+2. 启动 SBV2 API 服务（按你本地部署路径执行）：
    ```
-   F:\lingchat-research-studio--SBV2-API\snapshots\master\sbv2api-DirectML\sbv2_api.exe
+   ./sbv2_api.exe
    ```
-2. 等待日志出现 `Listening on 0.0.0.0:3000`，确认服务已监听 `3000` 端口。
-3. 确认推理服务内已放入以下语音模型：
+3. 等待日志出现 `Listening on 0.0.0.0:3000`，确认服务已监听 `3000` 端口。
+4. 确认推理服务内已加载以下说话人模型：
    - `Ling v2`（默认音色）
    - `Fusetsu_v1.5`
 
-> 提示：若推理服务未启动或地址不通，合成会失败并触发错误提示，请先检查服务进程。
+> 提示：若推理服务未启动或地址不通，合成会失败并触发错误提示，请先检查服务进程与端口可达性。
 
 ## 安装
 
-插件随 MaiBot 一起内置，无需额外安装。依赖项为 `aiohttp`（`>=3.8.0`）。
+通过 MaiBot WebUI 的插件市场搜索 `ggsfly.sbv2-tts-plugin` 并安装；或手动将本插件目录克隆到 MaiBot 的 `plugins/` 目录下。依赖项为 `aiohttp`（`>=3.8.0`），MaiBot 已默认携带该依赖，无需额外安装。
 
 ## 配置
 
