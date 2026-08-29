@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 运行时产物
+*.wav
+
+# 本地工作区
+.omo/
+
+# 日志
+logs/
+
+# 虚拟环境
+.venv/

@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "version": "1.0.0",
+  "name": "SBV2 日文语音合成插件",
+  "description": "调用本地 SBV2 推理服务合成日文语音的 TTS 插件",
+  "author": {
+    "name": "ggsfly",
+    "url": ""
+  },
+  "license": "GPL-3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/ggsfly/sbv2-tts-plugin",
+    "homepage": "https://github.com/ggsfly/sbv2-tts-plugin",
+    "documentation": "https://github.com/ggsfly/sbv2-tts-plugin",
+    "issues": "https://github.com/ggsfly/sbv2-tts-plugin/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8.0"
+    }
+  ],
+  "capabilities": [
+    "send.custom",
+    "send.text",
+    "llm.generate"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "id": "ggsfly.sbv2-tts-plugin"
+}

@@ -1,0 +1,22 @@
+[plugin]
+enabled = false
+config_version = "1.0.0"
+
+[general]
+timeout = 60
+max_text_length = 200
+use_base64_audio = false
+split_sentences = true
+split_delay = 0.3
+send_error_messages = true
+translate_to_japanese = true
+translate_model = ""
+
+[components]
+tool_enabled = true
+command_enabled = true
+
+[sbv2]
+api_url = "http://127.0.0.1:3000/synthesize"
+default_ident = "Ling v2"
+idents = ["Ling v2", "Fusetsu_v1.5"]
