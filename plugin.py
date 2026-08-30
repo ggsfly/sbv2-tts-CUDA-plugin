@@ -110,10 +110,18 @@ class GeneralConfig(PluginConfigBase):
     translate_model: str = Field(
         default="",
         description=(
-            "翻译用 LLM 任务名（task name），留空用 Host 首个可用任务。"
-            "可填：replyer / planner / utils / memory / mid_memory / learner / expression_use / emoji / vlm / voice / embedding。"
-            "注意：这是 MaiBot 的任务名而非模型标识符；具体模型在 model_config.toml 的 model_task_config.<task>.model_list 中配置。"
+            "翻译用 LLM。支持两种填法：① 任务名（replyer / planner / utils / memory / "
+            "mid_memory / learner / expression_use / emoji / vlm / voice / embedding）；"
+            "② 模型名（model_config.toml 中 [[models]] 的 name，如 gemini-3.7-flash-low，"
+            "需要 Host 转发 model_override 才生效，未支持时按 replyer 任务执行）。"
+            "留空 = replyer 任务。"
         ),
+        json_schema_extra={
+            "hint": (
+                "可填任务名（replyer/utils/planner 等）或具体模型名（如 gemini-3.7-flash-low）。"
+                "留空使用 replyer 任务。翻译是小任务，推荐 utils 或快速小模型。"
+            ),
+        },
     )
 
 
@@ -163,6 +171,9 @@ class Sbv2TTSPlugin(MaiBotPlugin):
     """
 
     config_model = SBV2TTSPluginConfig
+
+    # 可用 LLM 任务名缓存（进程内一次；None=未拉取）。由 _resolve_translate_model 维护。
+    _available_task_names: Optional[frozenset] = None
 
     # ─── 生命周期 ────────────────────────────────────────────────────────
 
@@ -439,6 +450,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         if not self.config.general.translate_to_japanese:
             return True, text
 
+        task_name, model_override = await self._resolve_translate_model()
         translator = JPTranslator(
             max_length=self.config.general.max_text_length,
         )
@@ -446,8 +458,49 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             text,
             log_prefix,
             self.ctx.llm.generate,
-            translate_model=self.config.general.translate_model,
+            translate_model=task_name,
+            model_override=model_override,
         )
+
+    async def _resolve_translate_model(self) -> Tuple[str, str]:
+        """把 ``translate_model`` 配置解析为 (任务名, 模型覆盖名)。
+
+        规则：
+        - 留空 → ``("replyer", "")``。绝不能把空任务名发给 Host：Host 对空
+          任务名取 ``model_task_config`` 的字母序首个任务（embedding），
+          用聊天请求打 embedding 模型会得到 404 Not Found。
+        - 值是已注册任务名（replyer/utils/...）→ 原样作为任务名。
+        - 其他值按具体模型名处理：任务固定回退 ``replyer``，模型名经
+          ``model_override`` 透传（Host 支持时做模型级覆盖，不支持时被忽略）。
+
+        Returns:
+            Tuple[str, str]: ``(task_name, model_override)``。
+        """
+
+        raw = (self.config.general.translate_model or "").strip()
+        if not raw:
+            return "replyer", ""
+
+        if self._available_task_names is None:
+            try:
+                names = await self.ctx.llm.get_available_models()
+                self._available_task_names = frozenset(
+                    str(n).strip() for n in names if str(n).strip()
+                )
+                self.ctx.logger.debug(
+                    "已缓存可用 LLM 任务名: %s", sorted(self._available_task_names),
+                )
+            except Exception as exc:
+                # 拉取失败时不写缓存（保持 None），下次调用重试；本次按模型名处理。
+                self.ctx.logger.warning(
+                    "获取可用 LLM 任务名列表失败 (%s)，translate_model 将按模型名处理",
+                    exc,
+                )
+                return "replyer", raw
+
+        if raw in self._available_task_names:
+            return raw, ""
+        return "replyer", raw
 
     # ─── 内部：分段发送 ──────────────────────────────────────────────────
 

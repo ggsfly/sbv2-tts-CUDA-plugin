@@ -135,12 +135,32 @@ def test_translate_forwards_translate_model_to_llm() -> None:
     assert fake.calls[0][1].get("model") == "custom-ja"
 
 
-def test_translate_passes_empty_string_for_default_model() -> None:
-    """未指定 translate_model 时，model 应为空串（让 Host 用默认）。"""
+def test_translate_defaults_to_replyer_task_when_model_empty() -> None:
+    """未指定 translate_model 时，model 应回退 replyer。
+
+    不能发空任务名：Host 对空任务名取 model_task_config 字母序首个任务
+    （embedding），用聊天请求打 embedding 模型会得到 404 Not Found。
+    """
     fake = FakeLLM({"success": True, "response": "テスト"})
     _run(JPTranslator().translate("测试", "[t]", fake))
 
-    assert fake.calls[0][1].get("model") == ""
+    assert fake.calls[0][1].get("model") == "replyer"
+
+
+def test_translate_forwards_model_override() -> None:
+    """model_override（具体模型名）应原样透传到 llm_generate 的 kwargs。"""
+    fake = FakeLLM({"success": True, "response": "テスト"})
+    _run(
+        JPTranslator().translate(
+            "测试", "[t]", fake,
+            translate_model="replyer",
+            model_override="gemini-3.7-flash-low",
+        )
+    )
+
+    kwargs = fake.calls[0][1]
+    assert kwargs.get("model") == "replyer"
+    assert kwargs.get("model_override") == "gemini-3.7-flash-low"
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ split_sentences = true            # 长文本分句逐段发送
 split_delay = 0.3                 # 句子之间延迟（秒）
 send_error_messages = true        # 合成失败时是否给用户提示
 translate_to_japanese = true      # 是否先把文本翻译为日文再合成（SBV2 为日文推理模型）
-translate_model = ""              # 翻译用 LLM 任务名（task name），留空用 Host 首个可用任务。
+translate_model = ""              # 翻译用 LLM：任务名或模型名，留空 = replyer 任务
 
 [components]
 tool_enabled = true               # LLM 自主触发的 Tool 组件（sbv2_tts_tool）
@@ -68,7 +68,7 @@ idents = ["Ling v2", "Fusetsu_v1.5"]   # 可选说话人列表
 | `[general]` | `split_delay` | 分句之间的发送间隔（秒） |
 | `[general]` | `send_error_messages` | 合成失败时是否向聊天流回显错误提示 |
 | `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；SBV2 为日文推理模型，建议保持 `true` |
-| `[general]` | `translate_model` | 翻译用 LLM **任务名**（不是模型标识符），可选：`replyer`/`planner`/`utils`/`memory`/`mid_memory`/`learner`/`expression_use`/`emoji`/`vlm`/`voice`/`embedding`，留空则用 Host 首个可用任务。推荐 `utils`（小任务快速模型）。具体模型在 `model_config.toml` 的 `model_task_config.<task>.model_list` 配置 |
+| `[general]` | `translate_model` | 翻译用 LLM，支持两种填法：① **任务名** `replyer`/`planner`/`utils`/`memory`/`mid_memory`/`learner`/`expression_use`/`emoji`/`vlm`/`voice`/`embedding`；② **模型名**（`model_config.toml` 中 `[[models]]` 的 `name`，如 `gemini-3.7-flash-low`；模型名直填需 Host 支持 `model_override` 转发，未支持时按 replyer 任务执行）。留空 = replyer 任务。翻译是小任务，推荐 `utils` 或快速小模型 |
 | `[components]` | `tool_enabled` | 是否启用 LLM 自主触发的 `sbv2_tts_tool` Tool |
 | `[components]` | `command_enabled` | 是否启用用户手动 `/sbv2` 命令 |
 | `[sbv2]` | `api_url` | SBV2 推理服务地址，需与前置条件中的服务一致 |
@@ -103,7 +103,7 @@ idents = ["Ling v2", "Fusetsu_v1.5"]   # 可选说话人列表
 ## 常见问题
 
 **Q: 翻译报"未找到名为 `xxx` 的模型配置"？**
-A: `translate_model` 是 **LLM 任务名**（`replyer`/`planner`/`utils` 等），不是模型标识符。MaiBot SDK 的 `ctx.llm.generate(model=X)` 把 `X` 当作 `model_task_config` 的字段名查表，模型名（如 `gemini-3.7-flash-low`）不属于这里，所以会找不到。具体模型在 `model_config.toml` 的 `[model_task_config.<task>] model_list` 配置。推荐用 `translate_model = "utils"`（小任务快速模型）。
+A: `translate_model` 现在支持两种填法：**任务名**（`replyer`/`utils` 等）或**具体模型名**（`model_config.toml` 中 `[[models]]` 的 `name`）。插件运行时会自动区分：值是任务名就按任务调用；否则视为模型名（任务回退 replyer，模型经 `model_override` 透传，需 Host 支持）。留空 = replyer 任务（旧版本留空会取到 embedding 任务导致 404 Not Found，已修复）。
 
 **Q: planner 调了 Tool 但只看到 `[语音消息]` 占位文字？**
 A: `[语音消息]` 是 MaiBot 文本回复管道里的占位——当 planner 决定"用 voice tool 发语音"时，文本回复管道会插入这个占位等真实语音消息替换。如果实际没发出（例如翻译失败），用户就只会看到 `[语音消息]` 伴随其他文本消息。检查插件日志（`plugin.sbv2_tts.translate`）看翻译/合成哪一步失败，修复后真实音频会替换占位。

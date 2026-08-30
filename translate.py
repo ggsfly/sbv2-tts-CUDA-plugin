@@ -69,6 +69,7 @@ class JPTranslator:
         log_prefix: str,
         llm_generate: LLMGenerate,
         translate_model: str = "",
+        model_override: str = "",
     ) -> Tuple[bool, str]:
         """把中文原文翻译为日文。
 
@@ -76,7 +77,12 @@ class JPTranslator:
         :param log_prefix: 日志前缀（通常是 ``[插件名][事件id]``），
             便于和 plugin 主流程的日志串起来。
         :param llm_generate: 异步 LLM 调用回调，签名见模块顶部 ``LLMGenerate``。
-        :param translate_model: 指定模型名；空字符串表示让 Host 端用默认任务模型。
+        :param translate_model: LLM 任务名（task name），如 ``replyer`` / ``utils``；
+            空字符串时回退 ``replyer``——Host 对空任务名会取字母序首个任务
+            （embedding），用聊天请求打 embedding 模型会得到 404 Not Found。
+        :param model_override: 具体模型名（``model_config.toml`` 中 ``[[models]]``
+            的 ``name``）；非空时透传给 Host 做模型级覆盖（需要 Host 支持，
+            不支持时被忽略、按任务名走）。
         :return: ``(success, payload)``：
             - 成功：``(True, 译文.strip())``
             - 失败：``(False, error_detail)``，**绝不返回原文**
@@ -88,7 +94,11 @@ class JPTranslator:
         prompt = self._PROMPT_TEMPLATE.format(max_length=self.max_length, text=text)
 
         try:
-            response = await llm_generate(prompt, model=translate_model or "")
+            response = await llm_generate(
+                prompt,
+                model=translate_model or "replyer",
+                model_override=model_override,
+            )
         except asyncio.TimeoutError as exc:
             # LLM 端超时，常见于 Host 卡死或任务模型未配置。
             logger.error("%s 日文翻译超时: %s", log_prefix, exc)
