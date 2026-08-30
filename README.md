@@ -37,6 +37,7 @@ config_version = "1.0.0"          # 配置文件版本，勿改
 timeout = 60                      # 请求超时（秒）
 max_text_length = 200             # 单次合成的最大文本长度
 use_base64_audio = true           # 音频投递方式，保持 true（见下方说明）
+strip_voice_placeholder = true    # 剥离 replyer 正文中的 [语音消息] 占位回声（见常见问题）
 split_sentences = true            # 长文本分句逐段发送
 split_delay = 0.3                 # 句子之间延迟（秒）
 send_error_messages = true        # 合成失败时是否给用户提示
@@ -61,7 +62,8 @@ idents = ["Ling v2", "Fusetsu_v1.5"]   # 可选说话人列表
 | `[plugin]` | `config_version` | 配置文件版本号，勿改 |
 | `[general]` | `timeout` | 请求 SBV2 推理服务的超时时间（秒） |
 | `[general]` | `max_text_length` | 单次合成的最大文本长度，超长文本会被约束 |
-| `[general]` | `use_base64_audio` | 音频投递方式，**保持 `true`**：`true` 走 `ctx.send.custom("voice")`（base64，MaiBot 官方识别的语音类型）；`false` 走 `"voiceurl"` 文件路径类型，MaiBot 发送层不识别该类型，会掉进 DictComponent 兜底导致平台适配器无法渲染成语音（仅 NapCat 特定改造版可用） |
+| `[general]` | `use_base64_audio` | 音频投递方式，**保持 `true`**：`true` 走 `ctx.send.custom("voice")`（base64，MaiBot 官方识别的语音类型）；`false` 走 `"voiceurl"` 文件路径类型，MaiBot 发送层不识别该类型，会掉进 DictComponent 兜底导致适配器无法渲染成语音（snowluma 适配器实测失败，NapCat 未经测试） |
+| `[general]` | `strip_voice_placeholder` | 是否剥离 replyer 正文中的 `[语音消息]` 占位回声（见常见问题），默认 `true` |
 | `[general]` | `split_sentences` | 是否按句子拆分逐段合成发送 |
 | `[general]` | `split_delay` | 分句之间的发送间隔（秒） |
 | `[general]` | `send_error_messages` | 合成失败时是否向聊天流回显错误提示 |
@@ -107,7 +109,10 @@ A: `translate_model` 是 **LLM 任务名**（`replyer`/`planner`/`utils` 等）�
 A: `[语音消息]` 是 MaiBot 文本回复管道里的占位——当 planner 决定"用 voice tool 发语音"时，文本回复管道会插入这个占位等真实语音消息替换。如果实际没发出（例如翻译失败），用户就只会看到 `[语音消息]` 伴随其他文本消息。检查插件日志（`plugin.sbv2_tts.translate`）看翻译/合成哪一步失败，修复后真实音频会替换占位。
 
 **Q: 工具显示"成功发送 N/N 条语音"但群里听不到声音？**
-A: 检查 `use_base64_audio` 是否为 `true`。MaiBot 的 `send.custom` 只识别 `"voice"`（base64 音频）类型；`"voiceurl"`（文件路径）不是官方识别类型，会掉进 DictComponent 兜底分支，平台适配器无法把它渲染成语音——所以工具返回成功但群里静音。保持 `use_base64_audio = true` 即可。
+A: 检查 `use_base64_audio` 是否为 `true`。MaiBot 的 `send.custom` 只识别 `"voice"`（base64 音频）类型；`"voiceurl"`（文件路径）不是官方识别类型，会掉进 DictComponent 兜底分支，适配器无法把它渲染成语音——所以工具返回成功但群里静音（snowluma 适配器实测如此，NapCat 未经测试）。保持 `use_base64_audio = true` 即可。
+
+**Q: 发语音后，为什么会出现一条"引用对方消息 + 文本 [语音消息]"？**
+A: 因果链是：① 插件发出真实语音，MaiBot 聊天历史把这条语音渲染为占位文本 `[语音消息]`；② 同一轮里 replyer 生成文字回复时，LLM 看到历史中的占位，偶尔会模仿着把 `[语音消息]` 写进回复正文开头；③ reply 工具发送首段文本时默认带 QQ 引用（引用对方消息），于是这条引用消息的内容就成了无意义的 `[语音消息]`。本插件已通过 `maisaka.reply.before_post_process` 钩子自动剥离该占位回声（`strip_voice_placeholder = true`），剥离后引用消息会显示真实的文字内容。若想彻底关闭所有引用回复，在 MaiBot WebUI 的「配置 → 如何发言 → 启用引用回复」关闭（这是 MaiBot 全局行为，与插件无关）。
 
 ## 已知限制
 

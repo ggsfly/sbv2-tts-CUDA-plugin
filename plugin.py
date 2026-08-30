@@ -27,9 +27,10 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import asyncio
 import logging
+import re
 
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import ToolParameterInfo, ToolParamType
+from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
 
 import aiohttp
 
@@ -41,6 +42,13 @@ from .utils.text import TTSTextUtils
 from .utils.session import TTSSessionManager
 
 logger = logging.getLogger("plugin.sbv2_tts")
+
+# replyer 会把聊天历史里语音消息的占位渲染（[语音消息]）模仿进回复正文开头，
+# 导致首条分段变成无意义的"[语音消息]"引用消息。这里用正则剥离该占位回声：
+# - 响应开头的连续占位（可带冒号/空格）：[语音消息]你音量... → 你音量...
+# - 独立成行的占位行（连同行尾换行一起删除，避免残留空行）
+_VOICE_PLACEHOLDER_LEADING_PATTERN = re.compile(r"^(?:\s*\[语音消息\]\s*)+")
+_VOICE_PLACEHOLDER_LINE_PATTERN = re.compile(r"^[ \t]*\[语音消息\][ \t]*(?:\n|$)", re.MULTILINE)
 
 # 智能分割标记，与 xuqian13_tts-voice-plugin 保持一致
 _SPLIT_MARKER = "|||SPLIT|||"
@@ -81,7 +89,15 @@ class GeneralConfig(PluginConfigBase):
         description=(
             "音频投递方式。true=base64 走 ctx.send.custom(\"voice\") 通道（MaiBot 官方识别的语音类型，推荐）；"
             "false=文件路径走 \"voiceurl\" 自定义类型，MaiBot 发送层不识别该类型，"
-            "会掉进 DictComponent 兜底导致平台适配器无法渲染成语音（仅 NapCat 特定改造版可用）。"
+            "会掉进 DictComponent 兜底导致适配器无法渲染成语音（snowluma 适配器实测失败，NapCat 未经测试）。"
+        ),
+    )
+    strip_voice_placeholder: bool = Field(
+        default=True,
+        description=(
+            "是否剥离 replyer 正文中的 [语音消息] 占位回声。"
+            "本插件发送语音后，聊天历史会把语音渲染为 [语音消息]，replyer 偶尔会模仿该占位并写进回复正文，"
+            "经智能分段后产生一条无意义的引用消息。开启后通过 maisaka.reply.before_post_process 钩子剥离。"
         ),
     )
     split_sentences: bool = Field(default=True, description="是否按句子拆分合成")
@@ -204,6 +220,53 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         del scope
         del config_data
         self.ctx.logger.info("SBV2 插件配置已更新: version=%s", version)
+
+    # ─── Hook：剥离回复正文中的语音占位回声 ──────────────────────────────
+
+    @HookHandler(
+        "maisaka.reply.before_post_process",
+        name="sbv2_strip_voice_placeholder",
+        mode=HookMode.BLOCKING,
+    )
+    async def strip_voice_placeholder(
+        self,
+        response: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """剥离 replyer 正文中的 [语音消息] 占位回声。
+
+        本插件发送语音后，聊天历史会把该语音渲染为占位文本，replyer 在
+        同一轮生成文字回复时可能把占位模仿进正文开头，经智能分段后会
+        产生一条只含"[语音消息]"的引用消息。此钩子在文本后处理前把它剥掉。
+
+        Args:
+            response: 即将执行后处理的回复正文。
+            **kwargs: Host 注入的其余钩子参数（session_id 等，本处理器不使用）。
+
+        Returns:
+            Dict[str, Any]: 钩子返回值；正文有变化时通过 modified_kwargs 改写。
+        """
+
+        del kwargs
+        if not self.config.general.strip_voice_placeholder:
+            return {"action": "continue"}
+        if not response or "[语音消息]" not in response:
+            return {"action": "continue"}
+
+        # 先剥离正文中间独立成行的占位，再剥离开头连续的占位前缀
+        cleaned = _VOICE_PLACEHOLDER_LINE_PATTERN.sub("", response)
+        cleaned = _VOICE_PLACEHOLDER_LEADING_PATTERN.sub("", cleaned).strip()
+
+        if cleaned == response:
+            return {"action": "continue"}
+        if not cleaned:
+            # 整条回复只有占位回声：如实暴露为空正文（语音已由工具发出），
+            # 由 Host 走"生成可见回复失败"分支，不静默保留占位。
+            self.ctx.logger.info("回复正文仅含 [语音消息] 占位回声，已剥离为空")
+            return {"action": "continue", "modified_kwargs": {"response": ""}}
+
+        self.ctx.logger.info("已剥离回复正文中的 [语音消息] 占位回声")
+        return {"action": "continue", "modified_kwargs": {"response": cleaned}}
 
     # ─── 内部：连接性探测 ────────────────────────────────────────────────
 

@@ -8,7 +8,10 @@ max_text_length = 200
 use_base64_audio = true
 # 音频投递方式。true=base64 走 ctx.send.custom("voice")（MaiBot 官方识别的语音类型，推荐）。
 # false=文件路径走 "voiceurl" 自定义类型——MaiBot 发送层不识别该类型，会掉进
-# DictComponent 兜底导致平台适配器无法渲染成语音（仅 NapCat 特定改造版可用）。
+# DictComponent 兜底导致适配器无法渲染成语音（snowluma 适配器实测失败，NapCat 未经测试）。
+# 是否剥离 replyer 正文中的 [语音消息] 占位回声（本插件发语音后，replyer 偶尔会
+# 把历史里的语音占位模仿进回复正文，产生一条无意义的引用消息）。
+strip_voice_placeholder = true
 split_sentences = true
 split_delay = 0.3
 send_error_messages = true
