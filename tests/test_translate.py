@@ -147,22 +147,6 @@ def test_translate_defaults_to_replyer_task_when_model_empty() -> None:
     assert fake.calls[0][1].get("model") == "replyer"
 
 
-def test_translate_forwards_model_override() -> None:
-    """model_override（具体模型名）应原样透传到 llm_generate 的 kwargs。"""
-    fake = FakeLLM({"success": True, "response": "テスト"})
-    _run(
-        JPTranslator().translate(
-            "测试", "[t]", fake,
-            translate_model="replyer",
-            model_override="gemini-3.7-flash-low",
-        )
-    )
-
-    kwargs = fake.calls[0][1]
-    assert kwargs.get("model") == "replyer"
-    assert kwargs.get("model_override") == "gemini-3.7-flash-low"
-
-
 # ---------------------------------------------------------------------------
 # 失败路径
 # ---------------------------------------------------------------------------

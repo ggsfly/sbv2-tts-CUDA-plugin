@@ -69,7 +69,6 @@ class JPTranslator:
         log_prefix: str,
         llm_generate: LLMGenerate,
         translate_model: str = "",
-        model_override: str = "",
     ) -> Tuple[bool, str]:
         """把中文原文翻译为日文。
 
@@ -80,9 +79,8 @@ class JPTranslator:
         :param translate_model: LLM 任务名（task name），如 ``replyer`` / ``utils``；
             空字符串时回退 ``replyer``——Host 对空任务名会取字母序首个任务
             （embedding），用聊天请求打 embedding 模型会得到 404 Not Found。
-        :param model_override: 具体模型名（``model_config.toml`` 中 ``[[models]]``
-            的 ``name``）；非空时透传给 Host 做模型级覆盖（需要 Host 支持，
-            不支持时被忽略、按任务名走）。
+            具体模型名直连由调用方通过注入定制的 llm_generate 回调实现
+            （见 plugin.py 的 _make_pinned_llm_callback）。
         :return: ``(success, payload)``：
             - 成功：``(True, 译文.strip())``
             - 失败：``(False, error_detail)``，**绝不返回原文**
@@ -97,7 +95,6 @@ class JPTranslator:
             response = await llm_generate(
                 prompt,
                 model=translate_model or "replyer",
-                model_override=model_override,
             )
         except asyncio.TimeoutError as exc:
             # LLM 端超时，常见于 Host 卡死或任务模型未配置。

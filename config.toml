@@ -16,11 +16,11 @@ split_sentences = true
 split_delay = 0.3
 send_error_messages = true
 translate_to_japanese = true
-# 翻译用 LLM。支持两种填法：
+# 翻译用 LLM。支持三种填法（按顺序解析，命中即用）：
 #   1) 任务名：replyer / planner / utils / memory / mid_memory / learner /
 #      expression_use / emoji / vlm / voice / embedding
-#   2) 模型名：model_config.toml 中 [[models]] 的 name（如 gemini-3.7-flash-low），
-#      需 Host 转发 model_override 才生效，未支持时按 replyer 任务执行
+#   2) 模型名：model_config.toml 中 [[models]] 的 name（如 gemini-3.7-flash-low）
+#   3) 模型标识符：[[models]] 的 model_identifier（如 gemini-3.7-flash-low 原始 ID）
 # 留空 = replyer 任务（不会取到 embedding 任务，避免 404 Not Found）
 translate_model = ""
 

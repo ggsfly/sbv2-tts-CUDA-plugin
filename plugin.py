@@ -23,11 +23,14 @@ import sys
 
 sys.dont_write_bytecode = True
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import asyncio
 import logging
+import os
 import re
+import tomllib
+from tomllib import TOMLDecodeError
 
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
@@ -59,6 +62,120 @@ _BACKEND_NAME = "sbv2"
 # 连接性探测目标（仅探测根路径；``/synthesize`` 才是合成入口）
 _PROBE_URL = "http://127.0.0.1:3000/"
 _PROBE_TIMEOUT_SECONDS = 3
+
+# ─── 模型名直连（参照 saberlights_smart-segmentation-plugin 的工程折中） ────
+# 插件 API（ctx.llm.generate）只支持任务名；要精确到 model_config.toml 的
+# 具体模型（[[models]].name / model_identifier），需借用宿主编排器。
+# 此 import 依赖 Runner 运行在宿主进程环境；失败时降级为任务名路径并告警。
+try:
+    from src.config.model_configs import TaskConfig as _HostTaskConfig
+    from src.llm_models.utils_model import LLMOrchestrator as _HostLLMOrchestrator
+
+    _HOST_ORCHESTRATOR_AVAILABLE = True
+except ImportError as _host_import_exc:  # pragma: no cover - 宿主环境差异
+    _HostTaskConfig = None
+    _HostLLMOrchestrator = None
+    _HOST_ORCHESTRATOR_AVAILABLE = False
+    logger.warning(
+        "无法导入宿主编排器（%s），translate_model 的模型名直填将回退为 replyer 任务执行",
+        _host_import_exc,
+    )
+
+# 宿主 model_config.toml 的 mtime 缓存，避免每次翻译都同步读盘
+_host_model_config_cache: Dict[str, Any] = {}
+_host_model_config_cache_mtime: Optional[float] = None
+
+
+def _find_host_model_config_path() -> str:
+    """定位宿主 model_config.toml（插件目录向上两级 = 宿主根）。"""
+
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    host_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
+    return os.path.join(host_root, "config", "model_config.toml")
+
+
+def _load_host_model_config() -> Dict[str, Any]:
+    """按 mtime 缓存读取宿主 model_config.toml；读取失败返回上次缓存。"""
+
+    global _host_model_config_cache, _host_model_config_cache_mtime
+    if not _HOST_ORCHESTRATOR_AVAILABLE:
+        return _host_model_config_cache
+
+    config_path = _find_host_model_config_path()
+    try:
+        mtime = os.path.getmtime(config_path)
+    except OSError as exc:
+        logger.warning("读取宿主 model_config.toml 失败，无法做模型名映射: %s", exc)
+        return _host_model_config_cache
+
+    if _host_model_config_cache_mtime == mtime and _host_model_config_cache:
+        return _host_model_config_cache
+
+    try:
+        with open(config_path, "rb") as config_file:
+            config_data = tomllib.load(config_file)
+    except (OSError, TOMLDecodeError) as exc:
+        logger.warning("解析宿主 model_config.toml 失败，无法做模型名映射: %s", exc)
+        return _host_model_config_cache
+
+    if not isinstance(config_data, dict):
+        return _host_model_config_cache
+
+    _host_model_config_cache = config_data
+    _host_model_config_cache_mtime = mtime
+    return _host_model_config_cache
+
+
+def _resolve_host_model_name(value: str) -> str:
+    """把模型别名或 model_identifier 解析为宿主 ``[[models]].name``。
+
+    Args:
+        value: 用户配置的模型名或模型标识符。
+
+    Returns:
+        str: 宿主 models.name；未命中返回空串。
+    """
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+
+    raw_models = _load_host_model_config().get("models")
+    if not isinstance(raw_models, list):
+        return ""
+
+    for model_item in raw_models:
+        if not isinstance(model_item, dict):
+            continue
+        model_alias = str(model_item.get("name", "") or "").strip()
+        model_identifier = str(model_item.get("model_identifier", "") or "").strip()
+        if normalized in {model_alias, model_identifier}:
+            return model_alias or normalized
+    return ""
+
+
+if _HOST_ORCHESTRATOR_AVAILABLE:
+
+    class _PinnedTaskLLMOrchestrator(_HostLLMOrchestrator):
+        """固定使用指定模型列表的轻量调度器（钉死 TaskConfig）。"""
+
+        def __init__(self, task_config: Any, request_type: str = "") -> None:
+            self._pinned_task_config = task_config
+            super().__init__(task_name="planner", request_type=request_type)
+
+        def _get_task_config_or_raise(self) -> Any:
+            return self._pinned_task_config
+
+        def _refresh_task_config(self) -> Any:
+            latest = self._pinned_task_config
+            if latest is not self.model_for_task:
+                self.model_for_task = latest
+            if list(self.model_usage.keys()) != latest.model_list:
+                self.model_usage = {
+                    model: self.model_usage.get(model, (0, 0, 0))
+                    for model in latest.model_list
+                }
+            return self.model_for_task
 
 
 # ─── 配置模型 ────────────────────────────────────────────────────────────
@@ -110,16 +227,18 @@ class GeneralConfig(PluginConfigBase):
     translate_model: str = Field(
         default="",
         description=(
-            "翻译用 LLM。支持两种填法：① 任务名（replyer / planner / utils / memory / "
-            "mid_memory / learner / expression_use / emoji / vlm / voice / embedding）；"
-            "② 模型名（model_config.toml 中 [[models]] 的 name，如 gemini-3.7-flash-low，"
-            "需要 Host 转发 model_override 才生效，未支持时按 replyer 任务执行）。"
+            "翻译用 LLM，支持三种填法（按顺序解析，命中即用）："
+            "① 任务名（replyer / planner / utils / memory / mid_memory / learner / "
+            "expression_use / emoji / vlm / voice / embedding）；"
+            "② 模型名（model_config.toml 中 [[models]] 的 name）；"
+            "③ 模型标识符（[[models]] 的 model_identifier）。"
             "留空 = replyer 任务。"
         ),
         json_schema_extra={
             "hint": (
-                "可填任务名（replyer/utils/planner 等）或具体模型名（如 gemini-3.7-flash-low）。"
-                "留空使用 replyer 任务。翻译是小任务，推荐 utils 或快速小模型。"
+                "可填任务名（replyer/utils/planner 等）、模型名或模型标识符（如 "
+                "gemini-3.7-flash-low）。留空使用 replyer 任务。翻译是小任务，"
+                "推荐 utils 或快速小模型。"
             ),
         },
     )
@@ -450,36 +569,41 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         if not self.config.general.translate_to_japanese:
             return True, text
 
-        task_name, model_override = await self._resolve_translate_model()
+        kind, task_name, model_name = await self._resolve_translate_model()
         translator = JPTranslator(
             max_length=self.config.general.max_text_length,
         )
+        if kind == "model":
+            llm_callback = self._make_pinned_llm_callback(model_name)
+        else:
+            llm_callback = self.ctx.llm.generate
         return await translator.translate(
             text,
             log_prefix,
-            self.ctx.llm.generate,
+            llm_callback,
             translate_model=task_name,
-            model_override=model_override,
         )
 
-    async def _resolve_translate_model(self) -> Tuple[str, str]:
-        """把 ``translate_model`` 配置解析为 (任务名, 模型覆盖名)。
+    async def _resolve_translate_model(self) -> Tuple[str, str, str]:
+        """把 ``translate_model`` 配置解析为 (类别, 任务名, 模型名)。
 
-        规则：
-        - 留空 → ``("replyer", "")``。绝不能把空任务名发给 Host：Host 对空
-          任务名取 ``model_task_config`` 的字母序首个任务（embedding），
-          用聊天请求打 embedding 模型会得到 404 Not Found。
-        - 值是已注册任务名（replyer/utils/...）→ 原样作为任务名。
-        - 其他值按具体模型名处理：任务固定回退 ``replyer``，模型名经
-          ``model_override`` 透传（Host 支持时做模型级覆盖，不支持时被忽略）。
+        规则（解析顺序即优先级）：
+        - 留空 → ``("task", "replyer", "")``。绝不能把空任务名发给 Host：
+          Host 对空任务名取 ``model_task_config`` 的字母序首个任务
+          （embedding），用聊天请求打 embedding 模型会得到 404 Not Found。
+        - 值是已注册任务名（replyer/utils/...）→ ``("task", 值, "")``。
+        - 值命中宿主 ``[[models]]`` 的 name 或 model_identifier →
+          ``("model", "replyer", models.name)``，经宿主编排器直连该模型。
+        - 都未命中 → 告警并回退 ``("task", "replyer", "")``。
 
         Returns:
-            Tuple[str, str]: ``(task_name, model_override)``。
+            Tuple[str, str, str]: ``(kind, task_name, model_name)``，
+            ``kind`` 取值 ``"task"`` 或 ``"model"``。
         """
 
         raw = (self.config.general.translate_model or "").strip()
         if not raw:
-            return "replyer", ""
+            return "task", "replyer", ""
 
         if self._available_task_names is None:
             try:
@@ -491,16 +615,62 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                     "已缓存可用 LLM 任务名: %s", sorted(self._available_task_names),
                 )
             except Exception as exc:
-                # 拉取失败时不写缓存（保持 None），下次调用重试；本次按模型名处理。
+                # 拉取失败时不写缓存（保持 None），下次调用重试；本次继续走
+                # 宿主模型表匹配，最终回退 replyer。
                 self.ctx.logger.warning(
-                    "获取可用 LLM 任务名列表失败 (%s)，translate_model 将按模型名处理",
+                    "获取可用 LLM 任务名列表失败 (%s)，translate_model 将按宿主模型表匹配",
                     exc,
                 )
-                return "replyer", raw
+                self._available_task_names = frozenset()
 
         if raw in self._available_task_names:
-            return raw, ""
-        return "replyer", raw
+            return "task", raw, ""
+
+        resolved_model_name = _resolve_host_model_name(raw)
+        if resolved_model_name and _HOST_ORCHESTRATOR_AVAILABLE:
+            self.ctx.logger.info(
+                "translate_model `%s` 已解析为宿主模型 `%s`，将直连该模型",
+                raw, resolved_model_name,
+            )
+            return "model", "replyer", resolved_model_name
+
+        self.ctx.logger.warning(
+            "translate_model `%s` 既不是可用任务名也未命中宿主模型表，回退 replyer 任务",
+            raw,
+        )
+        return "task", "replyer", ""
+
+    def _make_pinned_llm_callback(self, model_name: str) -> Callable[..., Any]:
+        """构造直连指定模型的 LLM 回调（签名兼容 JPTranslator 的 llm_generate）。"""
+
+        async def _pinned_generate(prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            """忽略回调透传的任务/模型参数，固定走宿主编排器直连模型。"""
+
+            del kwargs
+            max_tokens = max(256, min(self.config.general.max_text_length * 3, 1024))
+            orchestrator = _PinnedTaskLLMOrchestrator(
+                _HostTaskConfig(
+                    model_list=[model_name],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                    slow_threshold=30.0,
+                    selection_strategy="random",
+                ),
+                request_type="plugin.sbv2_tts.translate",
+            )
+            result = await orchestrator.generate_response_async(
+                prompt=prompt,
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return {
+                "success": True,
+                "response": result.response,
+                "reasoning": result.reasoning,
+                "model": result.model_name,
+            }
+
+        return _pinned_generate
 
     # ─── 内部：分段发送 ──────────────────────────────────────────────────
 
