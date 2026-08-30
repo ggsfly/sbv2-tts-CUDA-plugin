@@ -86,7 +86,11 @@ class GeneralConfig(PluginConfigBase):
     )
     translate_model: str = Field(
         default="",
-        description="翻译用 LLM 模型名，留空用 Host 默认",
+        description=(
+            "翻译用 LLM 任务名（task name），留空用 Host 首个可用任务。"
+            "可填：replyer / planner / utils / memory / mid_memory / learner / expression_use / emoji / vlm / voice / embedding。"
+            "注意：这是 MaiBot 的任务名而非模型标识符；具体模型在 model_config.toml 的 model_task_config.<task>.model_list 中配置。"
+        ),
     )
 
 
