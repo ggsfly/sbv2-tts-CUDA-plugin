@@ -36,7 +36,7 @@ config_version = "1.0.0"          # 配置文件版本，勿改
 [general]
 timeout = 60                      # 请求超时（秒）
 max_text_length = 200             # 单次合成的最大文本长度
-use_base64_audio = false          # true=base64 走 IPC；false=文件路径 voiceurl（更稳）
+use_base64_audio = true           # 音频投递方式，保持 true（见下方说明）
 split_sentences = true            # 长文本分句逐段发送
 split_delay = 0.3                 # 句子之间延迟（秒）
 send_error_messages = true        # 合成失败时是否给用户提示
@@ -61,7 +61,7 @@ idents = ["Ling v2", "Fusetsu_v1.5"]   # 可选说话人列表
 | `[plugin]` | `config_version` | 配置文件版本号，勿改 |
 | `[general]` | `timeout` | 请求 SBV2 推理服务的超时时间（秒） |
 | `[general]` | `max_text_length` | 单次合成的最大文本长度，超长文本会被约束 |
-| `[general]` | `use_base64_audio` | 音频回传方式，`true` 以 base64 走 IPC，`false` 用文件路径 voiceurl |
+| `[general]` | `use_base64_audio` | 音频投递方式，**保持 `true`**：`true` 走 `ctx.send.custom("voice")`（base64，MaiBot 官方识别的语音类型）；`false` 走 `"voiceurl"` 文件路径类型，MaiBot 发送层不识别该类型，会掉进 DictComponent 兜底导致平台适配器无法渲染成语音（仅 NapCat 特定改造版可用） |
 | `[general]` | `split_sentences` | 是否按句子拆分逐段合成发送 |
 | `[general]` | `split_delay` | 分句之间的发送间隔（秒） |
 | `[general]` | `send_error_messages` | 合成失败时是否向聊天流回显错误提示 |
@@ -105,6 +105,9 @@ A: `translate_model` 是 **LLM 任务名**（`replyer`/`planner`/`utils` 等）�
 
 **Q: planner 调了 Tool 但只看到 `[语音消息]` 占位文字？**
 A: `[语音消息]` 是 MaiBot 文本回复管道里的占位——当 planner 决定"用 voice tool 发语音"时，文本回复管道会插入这个占位等真实语音消息替换。如果实际没发出（例如翻译失败），用户就只会看到 `[语音消息]` 伴随其他文本消息。检查插件日志（`plugin.sbv2_tts.translate`）看翻译/合成哪一步失败，修复后真实音频会替换占位。
+
+**Q: 工具显示"成功发送 N/N 条语音"但群里听不到声音？**
+A: 检查 `use_base64_audio` 是否为 `true`。MaiBot 的 `send.custom` 只识别 `"voice"`（base64 音频）类型；`"voiceurl"`（文件路径）不是官方识别类型，会掉进 DictComponent 兜底分支，平台适配器无法把它渲染成语音——所以工具返回成功但群里静音。保持 `use_base64_audio = true` 即可。
 
 ## 已知限制
 

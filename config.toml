@@ -5,7 +5,10 @@ config_version = "1.0.0"
 [general]
 timeout = 60
 max_text_length = 200
-use_base64_audio = false
+use_base64_audio = true
+# 音频投递方式。true=base64 走 ctx.send.custom("voice")（MaiBot 官方识别的语音类型，推荐）。
+# false=文件路径走 "voiceurl" 自定义类型——MaiBot 发送层不识别该类型，会掉进
+# DictComponent 兜底导致平台适配器无法渲染成语音（仅 NapCat 特定改造版可用）。
 split_sentences = true
 split_delay = 0.3
 send_error_messages = true

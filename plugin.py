@@ -76,7 +76,14 @@ class GeneralConfig(PluginConfigBase):
 
     timeout: int = Field(default=60, description="请求超时（秒）")
     max_text_length: int = Field(default=200, description="单次合成的最大文本长度")
-    use_base64_audio: bool = Field(default=False, description="是否以 base64 形式回传音频")
+    use_base64_audio: bool = Field(
+        default=True,
+        description=(
+            "音频投递方式。true=base64 走 ctx.send.custom(\"voice\") 通道（MaiBot 官方识别的语音类型，推荐）；"
+            "false=文件路径走 \"voiceurl\" 自定义类型，MaiBot 发送层不识别该类型，"
+            "会掉进 DictComponent 兜底导致平台适配器无法渲染成语音（仅 NapCat 特定改造版可用）。"
+        ),
+    )
     split_sentences: bool = Field(default=True, description="是否按句子拆分合成")
     split_delay: float = Field(default=0.3, description="分句之间的发送间隔（秒）")
     send_error_messages: bool = Field(default=True, description="是否向聊天流回显错误提示")
