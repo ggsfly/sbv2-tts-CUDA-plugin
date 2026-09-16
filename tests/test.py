@@ -290,10 +290,7 @@ class TestExtract422Message:
 
 class TestBackendProfileResolution:
     def _fake_config_getter(self, voice_name: str = "Ling v2"):
-        voices = [
-            VoiceProfile(name="Ling v2", model="Ling-v2", speaker="Ling v2"),
-            VoiceProfile(name="Fusetsu_v1.5", model="Fusetsu-v1.5", speaker="Fusetsu_v1.5"),
-        ]
+        voices = ["Ling v2", "Fusetsu_v1.5"]
         table = {
             ConfigKeys.VOICE_API_URL: "http://127.0.0.1:5000/voice",
             ConfigKeys.VOICE_DEFAULT_VOICE: voice_name,

@@ -45,7 +45,7 @@ Style-Bert-VITS2-CUDA/
 
 ```toml
 [plugin]
-enabled = false
+enabled = true
 config_version = "1.0.0"
 
 [general]
@@ -71,32 +71,21 @@ command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command
 [voice]
 # Style-Bert-VITS2 (CUDA) API 地址，需指向 /voice 端点
 api_url = "http://127.0.0.1:5000/voice"
-# 默认音色名（取自 voices 列表中某条的 name）
+# 默认音色名（取自 voices 列表中某项）
 default_voice = "Ling v2"
 # 文本语言：JP / EN / ZH（默认 JP）
 language = "JP"
 # 语速，基准 1.0，越大越慢
 length = 1.0
-
-# 可选音色档案列表。-v 参数与 default_voice 从该列表按 name 匹配。
-[[voice.voices]]
-name = "Ling v2"
-model = "Ling-v2"
-speaker = "Ling v2"
-style = "Neutral"
-
-[[voice.voices]]
-name = "Fusetsu_v1.5"
-model = "Fusetsu-v1.5"
-speaker = "Fusetsu_v1.5"
-style = "Neutral"
+# 可选音色列表。-v 参数与 default_voice 从该列表匹配
+voices = ["Ling v2", "Fusetsu_v1.5"]
 ```
 
 ### 配置字段说明
 
 | 段 | 字段 | 说明 |
 |---|---|---|
-| `[plugin]` | `enabled` | 是否启用插件 |
+| `[plugin]` | `enabled` | 是否启用插件（默认 `true`） |
 | `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.0.0"`） |
 | `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
 | `[general]` | `max_text_length` | 单段合成的最大字符数，对齐服务端 `limit=100` |
@@ -109,10 +98,10 @@ style = "Neutral"
 | `[components]` | `tool_enabled` | 是否启用 `sbv2_tts_tool` Tool |
 | `[components]` | `command_enabled` | 是否启用 `/sbv2` Command |
 | `[voice]` | `api_url` | 推理服务端点，默认 `http://127.0.0.1:5000/voice` |
-| `[voice]` | `default_voice` | 默认音色档案名称 |
+| `[voice]` | `default_voice` | 默认音色名称 |
 | `[voice]` | `language` | 合成语种代码（`JP` / `EN` / `ZH`） |
 | `[voice]` | `length` | 语速调节，默认 1.0 |
-| `[voice.voices]` | `voices` | 音色 Profile 列表，包含 `name`、`model`、`speaker`、`style` |
+| `[voice]` | `voices` | 可选音色名称列表（字符串数组，完美适配 WebUI） |
 
 ---
 

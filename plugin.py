@@ -66,6 +66,12 @@ _BACKEND_NAME = "voice"
 _PROBE_URL = "http://127.0.0.1:5000/models/info"
 _PROBE_TIMEOUT_SECONDS = 5
 
+# 内置默认音色档案映射（对应 ModelScope 官方整合包中的预置模型）
+DEFAULT_VOICE_PROFILES: Dict[str, VoiceProfile] = {
+    "Ling v2": VoiceProfile(name="Ling v2", model="Ling-v2", speaker="Ling v2", style="Neutral"),
+    "Fusetsu_v1.5": VoiceProfile(name="Fusetsu_v1.5", model="Fusetsu-v1.5", speaker="Fusetsu_v1.5", style="Neutral"),
+}
+
 
 # ─── 配置模型 ────────────────────────────────────────────────────────────
 
@@ -77,7 +83,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_icon__ = "package"
     __ui_order__ = 0
 
-    enabled: bool = Field(default=False, description="是否启用插件")
+    enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="1.0.0", description="配置版本")
 
 
@@ -155,12 +161,9 @@ class VoiceConfig(PluginConfigBase):
     default_voice: str = Field(default="Ling v2", description="默认音色名（取自 voices 列表）")
     language: str = Field(default="JP", description="文本语言：JP / EN / ZH")
     length: float = Field(default=1.0, description="语速，基准 1.0，越大越慢")
-    voices: List[VoiceProfile] = Field(
-        default_factory=lambda: [
-            VoiceProfile(name="Ling v2", model="Ling-v2", speaker="Ling v2", style="Neutral"),
-            VoiceProfile(name="Fusetsu_v1.5", model="Fusetsu-v1.5", speaker="Fusetsu_v1.5", style="Neutral"),
-        ],
-        description="可选音色档案列表；-v 参数与 default_voice 从该列表按 name 匹配",
+    voices: List[str] = Field(
+        default_factory=lambda: ["Ling v2", "Fusetsu_v1.5"],
+        description="可选音色列表；-v 参数与 default_voice 从该列表按名称匹配",
     )
 
 
@@ -919,8 +922,9 @@ class SBV2TTSPlugin(MaiBotPlugin):
     def _resolve_voice(self, voice_name: str) -> VoiceProfile:
         """解析音色名到 :class:`VoiceProfile`。
 
-        命中 ``voice.voices`` 列表中的 ``name`` 则返回该档案；空串返回
-        ``default_voice`` 对应档案；未命中 **抛 ValueError** 如实暴露，
+        校验目标音色是否在 ``voice.voices`` 配置列表中，
+        命中则优先使用内置的 ``DEFAULT_VOICE_PROFILES`` 映射，
+        如未预置则按同名推导参数构造档案；未命中 **抛 ValueError** 如实暴露，
         并在消息中列出可选音色（符合 AGENTS"不无脑兜底"原则）。
 
         Args:
@@ -933,27 +937,31 @@ class SBV2TTSPlugin(MaiBotPlugin):
             ValueError: 音色名未命中配置列表。
         """
 
-        voices: List[VoiceProfile] = list(self.config.voice.voices or [])
+        voices: List[str] = list(self.config.voice.voices or [])
         # 空名 → 默认音色
         target = (voice_name or "").strip() or self.config.voice.default_voice
 
-        for profile in voices:
-            if profile.name == target:
-                return profile
+        if target not in voices:
+            available = "、".join(voices) or "（未配置任何音色）"
+            raise ValueError(
+                f"未知音色: {target or '<空>'}，可选: {available}"
+            )
 
-        available = "、".join(p.name for p in voices) or "（未配置任何音色）"
-        raise ValueError(
-            f"未知音色: {target or '<空>'}，可选: {available}"
+        if target in DEFAULT_VOICE_PROFILES:
+            return DEFAULT_VOICE_PROFILES[target]
+
+        return VoiceProfile(
+            name=target,
+            model=target,
+            speaker=target,
+            style="Neutral",
         )
 
     async def _send_help(self, stream_id: str) -> None:
         """发送 ``/sbv2 help`` 帮助文本。"""
 
-        voices: List[VoiceProfile] = list(self.config.voice.voices or [])
-        voice_lines = "\n".join(
-            f"  - {p.name}（model={p.model}, speaker={p.speaker}, style={p.style}）"
-            for p in voices
-        ) or "  （未配置任何音色）"
+        voices: List[str] = list(self.config.voice.voices or [])
+        voice_lines = "\n".join(f"  - {name}" for name in voices) or "  （未配置任何音色）"
 
         help_text = (
             "【Style-Bert-VITS2 日文语音合成插件帮助】\n\n"

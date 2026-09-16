@@ -28,8 +28,7 @@ logger = logging.getLogger("plugin.sbv2_tts.backend")
 class VoiceProfile(BaseModel):
     """音色档案：把用户友好的音色名映射到 Style-Bert-VITS2 的三个参数。
 
-    同时作为 Pydantic 配置模型（``[voice].voices`` 列表元素）与后端运行时
-    的音色描述对象，避免在 plugin / config / backend 之间重复定义同类结构。
+    作为后端运行时的音色描述对象。
 
     Attributes:
         name: 用户可见的音色名（``-v`` 与 ``default_voice`` 取值）。
@@ -42,6 +41,13 @@ class VoiceProfile(BaseModel):
     model: str
     speaker: str
     style: str = "Neutral"
+
+
+# 内置默认音色档案映射
+DEFAULT_VOICE_PROFILES: dict[str, VoiceProfile] = {
+    "Ling v2": VoiceProfile(name="Ling v2", model="Ling-v2", speaker="Ling v2", style="Neutral"),
+    "Fusetsu_v1.5": VoiceProfile(name="Fusetsu_v1.5", model="Fusetsu-v1.5", speaker="Fusetsu_v1.5", style="Neutral"),
+}
 
 
 class VoiceBackend(TTSBackendBase):
@@ -172,27 +178,19 @@ class VoiceBackend(TTSBackendBase):
     def _get_default_profile(self) -> VoiceProfile:
         """从配置构造默认音色档案。"""
 
-        default_voice = str(self.get_config(ConfigKeys.VOICE_DEFAULT_VOICE, "") or "")
+        default_voice = str(self.get_config(ConfigKeys.VOICE_DEFAULT_VOICE, "Ling v2") or "Ling v2")
         voices = self.get_config(ConfigKeys.VOICE_VOICES, []) or []
-        for entry in voices:
-            name = str(getattr(entry, "name", "") or "")
-            if name and name == default_voice:
-                return VoiceProfile(
-                    name=name,
-                    model=str(getattr(entry, "model", "") or ""),
-                    speaker=str(getattr(entry, "speaker", "") or ""),
-                    style=str(getattr(entry, "style", "Neutral") or "Neutral"),
-                )
-        # 配置缺失时退到第一个档案；列表为空则用空串（服务端会 422）
-        if voices:
-            entry = voices[0]
-            return VoiceProfile(
-                name=str(getattr(entry, "name", default_voice or "unknown") or default_voice or "unknown"),
-                model=str(getattr(entry, "model", "") or ""),
-                speaker=str(getattr(entry, "speaker", "") or ""),
-                style=str(getattr(entry, "style", "Neutral") or "Neutral"),
-            )
-        return VoiceProfile(name=default_voice or "unknown", model="", speaker="", style="Neutral")
+        target = default_voice if (not voices or default_voice in voices) else str(voices[0])
+
+        if target in DEFAULT_VOICE_PROFILES:
+            return DEFAULT_VOICE_PROFILES[target]
+
+        return VoiceProfile(
+            name=target,
+            model=target,
+            speaker=target,
+            style="Neutral",
+        )
 
     @staticmethod
     def _extract_422_message(error_text: str) -> str:

@@ -1,5 +1,5 @@
 [plugin]
-enabled = false
+enabled = true
 config_version = "1.0.0"
 
 [general]
@@ -28,23 +28,11 @@ command_enabled = true
 [voice]
 # Style-Bert-VITS2 (CUDA) API 地址，需指向 /voice 端点
 api_url = "http://127.0.0.1:5000/voice"
-# 默认音色名（取自 voices 列表中某条的 name）
+# 默认音色名（取自 voices 列表中某项）
 default_voice = "Ling v2"
 # 文本语言：JP / EN / ZH（默认日文，因插件会先把中文翻译为日文）
 language = "JP"
 # 语速，基准 1.0，越大越慢
 length = 1.0
-
-# 可选音色档案。-v 参数与 default_voice 从该列表按 name 匹配。
-# model = model_assets 目录名；speaker = spk2id 的键；style = style2id 的键
-[[voice.voices]]
-name = "Ling v2"
-model = "Ling-v2"
-speaker = "Ling v2"
-style = "Neutral"
-
-[[voice.voices]]
-name = "Fusetsu_v1.5"
-model = "Fusetsu-v1.5"
-speaker = "Fusetsu_v1.5"
-style = "Neutral"
+# 可选音色列表。-v 参数与 default_voice 从该列表匹配
+voices = ["Ling v2", "Fusetsu_v1.5"]
