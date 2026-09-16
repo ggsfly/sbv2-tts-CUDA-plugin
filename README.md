@@ -131,6 +131,42 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 
 ---
 
+## 权限与能力说明
+
+本插件在 `_manifest.json` 中声明了以下必要权限（`capabilities`），各能力的使用场景如下：
+
+| 能力标识 | 使用场景与说明 |
+|---|---|
+| `send.custom` | 核心语音投递能力：用于向聊天流投递 `voice` 类型 Base64 音频消息 |
+| `send.text` | 提示与错误反馈：用于向聊天流回显命令帮助文本、未知音色警告或合成失败详情 |
+| `llm.generate` | 中译日核心能力：在合成前将中文文本翻译为自然日文（支持直选模型与任务分发） |
+| `llm.get_available_models` | 任务名动态校验：用于识别 `translate_model` 所填项是模型任务名还是具体模型标识符 |
+| `component.disable` | 组件动态管理：在插件加载时根据配置的 `tool_enabled` / `command_enabled` 开关按需禁用对应组件 |
+
+---
+
+## 故障排查
+
+### 1. 启动失败或完全静默无响应
+- **检查配置是否开启**：确认插件目录下生成的 `config.toml` 中 `[plugin].enabled = true`。
+- **检查 SDK 依赖**：确认当前 MaiBot 运行环境的 `maibot-plugin-sdk` 版本满足 `>=2.8.1`。
+- **检查组件日志**：查看 MaiBot 启动控制台输出，搜索 `[plugin.sbv2_tts]` 或 `ggsfly.sbv2-tts-cuda-plugin` 查找加载日志。
+
+### 2. 语音合成失败：日文翻译失败
+- **检查翻译模型配置**：若 `translate_model` 配置了特定模型名称，请确认宿主 `config/model_config.toml` 中已注册该模型且其 API 提供方连通；留空则默认回退至 `replyer` 任务。
+- **排查错误文本**：插件会如实回显 Host 返回的错误信息（如额度耗尽、超时等），根据提示排查模型配置。
+
+### 3. 语音合成网络错误 / 连接被拒
+- **检查 API 服务**：确认已通过 `..01 启动API服务.bat` 成功启动本地 Style-Bert-VITS2 服务，且控制台输出 `server listen: http://127.0.0.1:5000`。
+- **检查端口与地址**：确认 `config.toml` 中 `[voice].api_url` 指向正确的地址（默认 `http://127.0.0.1:5000/voice`）。
+- **浏览器访问测试**：在浏览器打开 `http://127.0.0.1:5000/docs`，若无法打开则说明本地推理服务未正常运行。
+
+### 4. 服务端返回 422 错误（参数错误）
+- **音色不存在**：若使用 `/sbv2 -v <音色>` 指定了未知音色，请先使用 `/sbv2 help` 查看当前配置支持的音色名称。
+- **单段文本过长**：Style-Bert-VITS2 默认对单次输入字符有硬性上限（默认 100 字符），插件已开启自动截断保护；若自行修改了服务端的 `limit`，请同步调整插件的 `max_text_length`。
+
+---
+
 ## 测试方式
 
 本项目测试精简合并至单文件 `tests/test.py`，完整覆盖 utils、翻译层、后端参数组装与 manifest 不变量校验：
@@ -146,10 +182,9 @@ uv run pytest plugins/ggsfly_sbv2-tts-CUDA-plugin/tests/test.py -q
 ```
 ggsfly_sbv2-tts-CUDA-plugin/
 ├── _manifest.json           # 插件 manifest v2 (id: ggsfly.sbv2-tts-cuda-plugin)
-├── .gitignore               # 忽略规则
-├── config.toml              # 用户配置文件
+├── .gitignore               # 忽略规则（包含 /config.toml）
 ├── config_keys.py           # 配置键常量定义
-├── plugin.py                # 插件入口（MaiBotPlugin + Tool / Command / Hook）
+├── plugin.py                # 插件入口（MaiBotPlugin + Tool / Command / Hook，内置配置模型）
 ├── translate.py             # 中译日翻译层（SDK 2.x task_name/model_name 驱动）
 ├── README.md                # 插件使用文档
 ├── LICENSE                  # GPL-3.0-or-later

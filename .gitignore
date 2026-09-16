@@ -16,5 +16,8 @@ logs/
 # 虚拟环境
 .venv/
 
+# 本地运行配置（由 Runner 自动生成，不入版本控制）
+/config.toml
+
 # 本地开发配置
 pyrightconfig.json
