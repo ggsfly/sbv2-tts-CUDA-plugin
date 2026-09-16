@@ -1,18 +1,18 @@
 {
   "manifest_version": 2,
-  "version": "1.0.0",
-  "name": "SBV2 日文语音合成插件",
-  "description": "调用本地 SBV2 推理服务合成日文语音的 TTS 插件",
+  "version": "2.0.0",
+  "name": "Style-Bert-VITS2 日文语音合成插件 (CUDA)",
+  "description": "调用本地 Style-Bert-VITS2 (CUDA) 推理服务合成日文语音的 TTS 插件",
   "author": {
     "name": "ggsfly",
     "url": "https://github.com/ggsfly"
   },
   "license": "GPL-3.0-or-later",
   "urls": {
-    "repository": "https://github.com/ggsfly/sbv2-tts-plugin",
-    "homepage": "https://github.com/ggsfly/sbv2-tts-plugin",
-    "documentation": "https://github.com/ggsfly/sbv2-tts-plugin",
-    "issues": "https://github.com/ggsfly/sbv2-tts-plugin/issues"
+    "repository": "https://github.com/ggsfly/sbv2-tts-cuda-plugin",
+    "homepage": "https://github.com/ggsfly/sbv2-tts-cuda-plugin",
+    "documentation": "https://github.com/ggsfly/sbv2-tts-cuda-plugin",
+    "issues": "https://github.com/ggsfly/sbv2-tts-cuda-plugin/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
@@ -32,7 +32,9 @@
   "capabilities": [
     "send.custom",
     "send.text",
-    "llm.generate"
+    "llm.generate",
+    "llm.get_available_models",
+    "component.disable"
   ],
   "i18n": {
     "default_locale": "zh-CN",
@@ -40,5 +42,5 @@
       "zh-CN"
     ]
   },
-  "id": "ggsfly.sbv2-tts-plugin"
+  "id": "ggsfly.sbv2-tts-cuda-plugin"
 }

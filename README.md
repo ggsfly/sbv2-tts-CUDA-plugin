@@ -1,150 +1,169 @@
-# SBV2 日文语音合成插件
+# Style-Bert-VITS2 (CUDA) 日文语音合成插件
 
-MaiBot 的文本转语音插件，调用本地 SBV2 推理服务合成日文语音。SBV2 是日文推理模型，因此插件会先把输入文本翻译为日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
+MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推理服务合成日文语音。Style-Bert-VITS2 是日文推理模型，因此插件会先把输入文本翻译为日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
 
-> **v1.0.0** — 基于 MaiBot SDK 2.x（`MaiBotPlugin` + `@Tool` / `@Command` + Pydantic 配置）。
+> **v2.0.0** — 基于 MaiBot SDK 2.x 重构：原生模型/任务直连（无 `src.*` 导入）、适配新版 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。
+
+---
 
 ## 前置条件
 
-本插件不内置、也不自动管理 SBV2 推理服务进程，需要你**自行部署并手动启动**本地推理服务：
+本插件不内置、也不自动管理 Style-Bert-VITS2 推理服务进程，需要你**自行部署并手动启动**本地推理服务：
 
-1. 准备 SBV2 推理服务（需自带 `sbv2_api.exe` 与 `Bert/` 目录下的 `deberta.onnx` + `tokenizer.json`，以及 `Model/` 目录下的说话人模型文件）。
-2. 启动 SBV2 API 服务（按你本地部署路径执行）：
-   ```
-   ./sbv2_api.exe
-   ```
-3. 等待日志出现 `Listening on 0.0.0.0:3000`，确认服务已监听 `3000` 端口。
-4. 确认推理服务内已加载以下说话人模型：
-   - `Ling v2`（默认音色）
-   - `Fusetsu_v1.5`
+1. 启动 API 服务：
+   运行 `F:\sbv2 CUDA\dir\Style-Bert-VITS2-CUDA\..01 启动API服务.bat`
+2. 等待控制台输出 `server listen: http://127.0.0.1:5000`，确认服务已监听 `5000` 端口。
+3. 确认推理服务已就绪（可访问 `http://127.0.0.1:5000/docs` 查看交互式 API 文档）。
+4. 默认内置并加载以下模型档案：
+   - `Ling v2`（默认音色，对应模型 `Ling-v2`）
+   - `Fusetsu_v1.5`（对应模型 `Fusetsu-v1.5`）
 
-> 提示：若推理服务未启动或地址不通，合成会失败并触发错误提示，请先检查服务进程与端口可达性。
+> 提示：中文 API 详细参数手册已生成至系统桌面：`StyleBertVITS2_API_中文使用文档.md`，可随时参阅。
 
-## 安装
+---
 
-通过 MaiBot WebUI 的插件市场搜索 `ggsfly.sbv2-tts-plugin` 并安装；或手动将本插件目录克隆到 MaiBot 的 `plugins/` 目录下。依赖项为 `aiohttp`（`>=3.8.0`），MaiBot 已默认携带该依赖，无需额外安装。
+## 安装与依赖
 
-## 配置
+1. 确保本插件位于 MaiBot 的 `plugins/ggsfly_sbv2-tts-CUDA-plugin` 目录。
+2. 依赖项为 `aiohttp`（`>=3.8.0`），MaiBot 运行时已默认内置，无需额外手动安装。
 
-编辑 `plugins/sbv2-tts-plugin/config.toml`：
+---
+
+## 配置说明
+
+编辑 `plugins/ggsfly_sbv2-tts-CUDA-plugin/config.toml`：
 
 ```toml
 [plugin]
-enabled = true                    # 是否启用插件
-config_version = "1.0.0"          # 配置文件版本，勿改
+enabled = false
+config_version = "2.0.0"
 
 [general]
-timeout = 60                      # 请求超时（秒）
-max_text_length = 200             # 单次合成的最大文本长度
-use_base64_audio = true           # 音频投递方式，保持 true（见下方说明）
-strip_voice_placeholder = true    # 剥离 replyer 正文中的 [语音消息] 占位回声（见常见问题）
-split_sentences = true            # 长文本分句逐段发送
-split_delay = 0.3                 # 句子之间延迟（秒）
-send_error_messages = true        # 合成失败时是否给用户提示
-translate_to_japanese = true      # 是否先把文本翻译为日文再合成（SBV2 为日文推理模型）
-translate_model = ""              # 翻译用 LLM：任务名或模型名，留空 = replyer 任务
+timeout = 60
+# 单段合成文本的最大字符数。Style-Bert-VITS2 服务端 limit 默认 100，超过会返回 422。
+# 插件会自动按该长度对长段做二次切分（clamp）。
+max_text_length = 100
+strip_voice_placeholder = true    # 剥离 replyer 正文中的 [语音消息] 占位回声
+split_sentences = true            # 长文本按标点分句逐段合成
+split_delay = 0.3                 # 句子之间的发送间隔（秒）
+send_error_messages = true        # 合成失败时是否向聊天流回显错误提示
+translate_to_japanese = true      # 是否先把文本翻译为日文再合成
+# 翻译用 LLM。支持两种填法：
+#   1) 任务名：replyer / utils / planner / memory 等
+#   2) 模型名 / 模型标识符：model_config.toml 中 [[models]] 的 name 或 model_identifier
+# 留空 = replyer 任务。无效模型直传 Host 解析，报错即时暴露。
+translate_model = ""
 
 [components]
 tool_enabled = true               # LLM 自主触发的 Tool 组件（sbv2_tts_tool）
-command_enabled = true            # 用户手动 /sbv2 命令
+command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command）
 
-[sbv2]
-api_url = "http://127.0.0.1:3000/synthesize"   # SBV2 推理服务地址
-default_ident = "Ling v2"         # 默认说话人
-idents = ["Ling v2", "Fusetsu_v1.5"]   # 可选说话人列表
+[voice]
+# Style-Bert-VITS2 (CUDA) API 地址，需指向 /voice 端点
+api_url = "http://127.0.0.1:5000/voice"
+# 默认音色名（取自 voices 列表中某条的 name）
+default_voice = "Ling v2"
+# 文本语言：JP / EN / ZH（默认 JP）
+language = "JP"
+# 语速，基准 1.0，越大越慢
+length = 1.0
+
+# 可选音色档案列表。-v 参数与 default_voice 从该列表按 name 匹配。
+[[voice.voices]]
+name = "Ling v2"
+model = "Ling-v2"
+speaker = "Ling v2"
+style = "Neutral"
+
+[[voice.voices]]
+name = "Fusetsu_v1.5"
+model = "Fusetsu-v1.5"
+speaker = "Fusetsu_v1.5"
+style = "Neutral"
 ```
 
 ### 配置字段说明
 
 | 段 | 字段 | 说明 |
-|----|------|------|
+|---|---|---|
 | `[plugin]` | `enabled` | 是否启用插件 |
-| `[plugin]` | `config_version` | 配置文件版本号，勿改 |
-| `[general]` | `timeout` | 请求 SBV2 推理服务的超时时间（秒） |
-| `[general]` | `max_text_length` | 单次合成的最大文本长度，超长文本会被约束 |
-| `[general]` | `use_base64_audio` | 音频投递方式，**保持 `true`**：`true` 走 `ctx.send.custom("voice")`（base64，MaiBot 官方识别的语音类型）；`false` 走 `"voiceurl"` 文件路径类型，MaiBot 发送层不识别该类型，会掉进 DictComponent 兜底导致适配器无法渲染成语音（snowluma 适配器实测失败，NapCat 未经测试） |
-| `[general]` | `strip_voice_placeholder` | 是否剥离 replyer 正文中的 `[语音消息]` 占位回声（见常见问题），默认 `true` |
-| `[general]` | `split_sentences` | 是否按句子拆分逐段合成发送 |
-| `[general]` | `split_delay` | 分句之间的发送间隔（秒） |
-| `[general]` | `send_error_messages` | 合成失败时是否向聊天流回显错误提示 |
-| `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；SBV2 为日文推理模型，建议保持 `true` |
-| `[general]` | `translate_model` | 翻译用 LLM，支持三种填法（按顺序解析，命中即用）：① **任务名** `replyer`/`planner`/`utils`/`memory`/`mid_memory`/`learner`/`expression_use`/`emoji`/`vlm`/`voice`/`embedding`；② **模型名**（`model_config.toml` 中 `[[models]]` 的 `name`）；③ **模型标识符**（`[[models]]` 的 `model_identifier`）。留空 = replyer 任务。翻译是小任务，推荐 `utils` 或快速小模型 |
-| `[components]` | `tool_enabled` | 是否启用 LLM 自主触发的 `sbv2_tts_tool` Tool |
-| `[components]` | `command_enabled` | 是否启用用户手动 `/sbv2` 命令 |
-| `[sbv2]` | `api_url` | SBV2 推理服务地址，需与前置条件中的服务一致 |
-| `[sbv2]` | `default_ident` | 默认说话人，未指定音色时使用 |
-| `[sbv2]` | `idents` | 可选说话人列表，`-v` 指定时从该列表选择 |
+| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"2.0.0"`） |
+| `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
+| `[general]` | `max_text_length` | 单段合成的最大字符数，对齐服务端 `limit=100` |
+| `[general]` | `strip_voice_placeholder` | 剥离 replyer 回复正文中的 `[语音消息]` 占位回声，默认 `true` |
+| `[general]` | `split_sentences` | 是否按标点切分句子逐段合成发送 |
+| `[general]` | `split_delay` | 分句发送间隔（秒） |
+| `[general]` | `send_error_messages` | 合成或翻译失败时是否回显错误文本 |
+| `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true` |
+| `[general]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务 |
+| `[components]` | `tool_enabled` | 是否启用 `sbv2_tts_tool` Tool |
+| `[components]` | `command_enabled` | 是否启用 `/sbv2` Command |
+| `[voice]` | `api_url` | 推理服务端点，默认 `http://127.0.0.1:5000/voice` |
+| `[voice]` | `default_voice` | 默认音色档案名称 |
+| `[voice]` | `language` | 合成语种代码（`JP` / `EN` / `ZH`） |
+| `[voice]` | `length` | 语速调节，默认 1.0 |
+| `[voice.voices]` | `voices` | 音色 Profile 列表，包含 `name`、`model`、`speaker`、`style` |
+
+---
 
 ## 使用方法
 
 ### 命令触发（用户手动）
 
+```bash
+/sbv2 你好世界                      # 使用默认音色（Ling v2）
+/sbv2 こんにちは -v Fusetsu_v1.5    # 指定音色 Fusetsu_v1.5
+/voice 今天天气不错                 # /sbv2 的等价别名
+/sbv2 help                          # 查看帮助与当前所有可用音色
 ```
-/sbv2 你好世界                    # 使用默认音色（Ling v2）
-/sbv2 こんにちは -v Fusetsu_v1.5  # 指定音色 Fusetsu_v1.5
-/sbv2 help                        # 查看帮助
+
+- 若传入未知音色，插件会明确返回错误信息并列出当前所有可用音色（避免静默回退造成混淆）。
+
+### 自动触发（LLM Agent 规划）
+
+当 Agent 决定进行日文语音回复时，会自主调用 `sbv2_tts_tool`。可通过 `[components].tool_enabled` 开启或关闭。
+
+---
+
+## 智能分句与防超限截断
+
+1. **智能切分**：`|||SPLIT|||` 显式标记优先切分 > 标点符号自动切句 > 单句直接合成。
+2. **超限保护（Clamp）**：由于 Style-Bert-VITS2 服务端设置了 `limit=100` 字符上限，插件在分句后会对任何超过 `max_text_length` 的无标点长文本进行安全分块截断，彻底避免服务端返回 422 错误。
+
+---
+
+## 测试方式
+
+本项目测试精简合并至单文件 `tests/test.py`，完整覆盖 utils、翻译层、后端参数组装与 manifest 不变量校验：
+
+```bash
+cd F:\MaiBot
+uv run pytest plugins/ggsfly_sbv2-tts-CUDA-plugin/tests/test.py -q
 ```
 
-- 不带 `-v` 参数时使用配置中的 `default_ident`（默认 `Ling v2`）。
-- `-v` 指定的音色需在配置的 `idents` 列表中，否则回退到默认音色。
-
-### 自动触发（LLM 决定）
-
-当 LLM 判断需要语音回复时，会调用插件注册的 `sbv2_tts_tool` Tool 自动合成语音，无需用户手动输入命令。可通过 `[components]` 段的 `tool_enabled` 开关控制。
-
-## 智能分割
-
-本插件支持智能分割：`|||SPLIT|||` 标记精确分段，长文本自动分句。
-
-- **优先级**：`|||SPLIT|||` 标记优先切分 > 按标点自动切分 > 单句发送
-- **示例**：`今天天气不错|||SPLIT|||适合出去玩|||SPLIT|||你觉得呢` → 三段语音依次发送
-- `split_sentences = false` 时关闭标点自动切分，但仍会按 `|||SPLIT|||` 标记分段。
-
-## 常见问题
-
-**Q: 翻译报"未找到名为 `xxx` 的模型配置"？**
-A: `translate_model` 支持三种填法（按顺序解析，命中即用）：**任务名**（`replyer`/`utils` 等）、**模型名**（`model_config.toml` 中 `[[models]]` 的 `name`）、**模型标识符**（`[[models]]` 的 `model_identifier`）。插件运行时自动区分：任务名按任务调用；模型名/标识符经宿主编排器直连该模型。留空 = replyer 任务（旧版本留空会取到 embedding 任务导致 404 Not Found，已修复）。
-
-**Q: planner 调了 Tool 但只看到 `[语音消息]` 占位文字？**
-A: `[语音消息]` 是 MaiBot 文本回复管道里的占位——当 planner 决定"用 voice tool 发语音"时，文本回复管道会插入这个占位等真实语音消息替换。如果实际没发出（例如翻译失败），用户就只会看到 `[语音消息]` 伴随其他文本消息。检查插件日志（`plugin.sbv2_tts.translate`）看翻译/合成哪一步失败，修复后真实音频会替换占位。
-
-**Q: 工具显示"成功发送 N/N 条语音"但群里听不到声音？**
-A: 检查 `use_base64_audio` 是否为 `true`。MaiBot 的 `send.custom` 只识别 `"voice"`（base64 音频）类型；`"voiceurl"`（文件路径）不是官方识别类型，会掉进 DictComponent 兜底分支，适配器无法把它渲染成语音——所以工具返回成功但群里静音（snowluma 适配器实测如此，NapCat 未经测试）。保持 `use_base64_audio = true` 即可。
-
-**Q: 发语音后，为什么会出现一条"引用对方消息 + 文本 [语音消息]"？**
-A: 因果链是：① 插件发出真实语音，MaiBot 聊天历史把这条语音渲染为占位文本 `[语音消息]`；② 同一轮里 replyer 生成文字回复时，LLM 看到历史中的占位，偶尔会模仿着把 `[语音消息]` 写进回复正文开头；③ reply 工具发送首段文本时默认带 QQ 引用（引用对方消息），于是这条引用消息的内容就成了无意义的 `[语音消息]`。本插件已通过 `maisaka.reply.before_post_process` 钩子自动剥离该占位回声（`strip_voice_placeholder = true`），剥离后引用消息会显示真实的文字内容。若想彻底关闭所有引用回复，在 MaiBot WebUI 的「配置 → 如何发言 → 启用引用回复」关闭（这是 MaiBot 全局行为，与插件无关）。
-
-## 已知限制
-
-- **日文模型须先翻译**：SBV2 是日文推理模型，直接传入中文会输出乱码。插件默认开启 `translate_to_japanese`，先由 LLM 翻译为日文再合成。
-- **翻译失败不发语音**：翻译失败时插件**绝不**静默回退到中文原文，而是通过日志 `logger.error` 完整暴露错误，避免用中文喂出乱码再让用户听到；`send_error_messages` 决定是否向聊天流回显错误。
-- **不自动管理 SBV2 服务进程**：插件不会拉起/监控 `sbv2_api.exe`，需手动启动推理服务并保证端口可达。
+---
 
 ## 项目结构
 
 ```
-sbv2-tts-plugin/
-├── _manifest.json           # 插件 manifest v2
+ggsfly_sbv2-tts-CUDA-plugin/
+├── _manifest.json           # 插件 manifest v2 (id: ggsfly.sbv2-tts-cuda-plugin)
 ├── .gitignore               # 忽略规则
-├── config.toml              # 用户配置
-├── config_keys.py           # 配置 key 常量
-├── plugin.py                # 插件入口（MaiBotPlugin 子类 + Pydantic 配置模型）
-├── translate.py             # 中文到日文的翻译层（失败不发语音）
-├── README.md                # 本文件
+├── config.toml              # 用户配置文件
+├── config_keys.py           # 配置键常量定义
+├── plugin.py                # 插件入口（MaiBotPlugin + Tool / Command / Hook）
+├── translate.py             # 中译日翻译层（SDK 2.x task_name/model_name 驱动）
+├── README.md                # 插件使用文档
 ├── LICENSE                  # GPL-3.0-or-later
-├── utils/                   # 工具层
+├── backends/                # 后端适配层
 │   ├── __init__.py
-│   ├── text.py              # 文本清理/语言检测/标点分句
-│   ├── file.py              # 异步文件 IO / 临时文件
-│   └── session.py           # aiohttp 单例 session
-└── tests/                   # 单元测试
-    ├── test_utils.py
-    └── tmp/
+│   ├── base.py              # TTSResult 与基类定义（base64 投递）
+│   └── voice.py             # Style-Bert-VITS2 /voice HTTP 客户端与 VoiceProfile
+├── utils/                   # 通用工具
+│   ├── __init__.py
+│   ├── file.py              # base64 编解码与数据校验
+│   ├── session.py           # aiohttp ClientSession 复用池
+│   └── text.py              # 文本清理、语种检测、分句与 clamp 截断
+└── tests/                   # 自动化测试
+    └── test.py              # 全量自包含单元测试
 ```
-
-## 信息
-
-- **版本**：1.0.0
-- **作者**：ggsfly
-- **许可**：GPL-3.0-or-later
-- **插件 ID**：`ggsfly.sbv2-tts-plugin`

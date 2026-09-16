@@ -1,14 +1,12 @@
 [plugin]
 enabled = false
-config_version = "1.0.0"
+config_version = "2.0.0"
 
 [general]
 timeout = 60
-max_text_length = 200
-use_base64_audio = true
-# 音频投递方式。true=base64 走 ctx.send.custom("voice")（MaiBot 官方识别的语音类型，推荐）。
-# false=文件路径走 "voiceurl" 自定义类型——MaiBot 发送层不识别该类型，会掉进
-# DictComponent 兜底导致适配器无法渲染成语音（snowluma 适配器实测失败，NapCat 未经测试）。
+# 单段合成文本的最大字符数。Style-Bert-VITS2 服务端 limit 默认 100，
+# 超过会返回 422；插件会自动按该长度对长段做二次切分。
+max_text_length = 100
 # 是否剥离 replyer 正文中的 [语音消息] 占位回声（本插件发语音后，replyer 偶尔会
 # 把历史里的语音占位模仿进回复正文，产生一条无意义的引用消息）。
 strip_voice_placeholder = true
@@ -16,19 +14,37 @@ split_sentences = true
 split_delay = 0.3
 send_error_messages = true
 translate_to_japanese = true
-# 翻译用 LLM。支持三种填法（按顺序解析，命中即用）：
-#   1) 任务名：replyer / planner / utils / memory / mid_memory / learner /
-#      expression_use / emoji / vlm / voice / embedding
-#   2) 模型名：model_config.toml 中 [[models]] 的 name（如 gemini-3.7-flash-low）
-#   3) 模型标识符：[[models]] 的 model_identifier（如 gemini-3.7-flash-low 原始 ID）
-# 留空 = replyer 任务（不会取到 embedding 任务，避免 404 Not Found）
+# 翻译用 LLM。支持两种填法：
+#   1) 任务名：replyer / utils / planner / memory 等（见 Host model_config.toml 的任务）
+#   2) 模型名 / 模型标识符：model_config.toml 中 [[models]] 的 name 或 model_identifier
+# 留空 = replyer 任务。
+# 命中任务名时按任务调用；否则视为模型名直传 Host 解析，模型无效时翻译失败如实暴露。
 translate_model = ""
 
 [components]
 tool_enabled = true
 command_enabled = true
 
-[sbv2]
-api_url = "http://127.0.0.1:3000/synthesize"
-default_ident = "Ling v2"
-idents = ["Ling v2", "Fusetsu_v1.5"]
+[voice]
+# Style-Bert-VITS2 (CUDA) API 地址，需指向 /voice 端点
+api_url = "http://127.0.0.1:5000/voice"
+# 默认音色名（取自 voices 列表中某条的 name）
+default_voice = "Ling v2"
+# 文本语言：JP / EN / ZH（默认日文，因插件会先把中文翻译为日文）
+language = "JP"
+# 语速，基准 1.0，越大越慢
+length = 1.0
+
+# 可选音色档案。-v 参数与 default_voice 从该列表按 name 匹配。
+# model = model_assets 目录名；speaker = spk2id 的键；style = style2id 的键
+[[voice.voices]]
+name = "Ling v2"
+model = "Ling-v2"
+speaker = "Ling v2"
+style = "Neutral"
+
+[[voice.voices]]
+name = "Fusetsu_v1.5"
+model = "Fusetsu-v1.5"
+speaker = "Fusetsu_v1.5"
+style = "Neutral"

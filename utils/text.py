@@ -1,10 +1,10 @@
-"""
-文本处理工具类
+"""文本处理工具类
 
 提供 TTS 场景下的文本预处理能力：
 - clean_text：去除首尾空白（保留原文以便上层决策）
 - detect_language：按字符比例判定语言（zh / ja / en）
 - split_sentences：按中英文句末标点切句，过短的句子并入前一句
+- clamp_sentences：对超过服务端长度上限的段落做二次切分
 """
 
 from typing import List
@@ -135,3 +135,35 @@ class TTSTextUtils:
             sentences = merged
 
         return sentences
+
+    @classmethod
+    def clamp_sentences(cls, sentences: List[str], max_length: int) -> List[str]:
+        """
+        对超过服务端长度上限的段落做二次切分。
+
+        Style-Bert-VITS2 服务端对单次 ``text`` 有字符数上限（``limit``，默认 100），
+        超过会返回 422。本方法在 ``split_sentences`` 之后兜底：对任何长度超过
+        ``max_length`` 的句子，按 ``max_length`` 等长切分为多段，保证每段都不超限。
+
+        Args:
+            sentences: 经过句末标点切分后的句子列表。
+            max_length: 单段最大字符数；<= 0 时直接返回原列表。
+
+        Returns:
+            切分后的句子列表，每段长度 <= max_length。
+        """
+        if max_length <= 0:
+            return list(sentences)
+
+        result: List[str] = []
+        for sentence in sentences:
+            if len(sentence) <= max_length:
+                result.append(sentence)
+                continue
+            # 等长硬切：不尝试在词/标点处断句，因为上游 split_sentences 已按标点切过，
+            # 这里只剩"无标点的长段"，硬切是唯一可行做法。
+            for i in range(0, len(sentence), max_length):
+                chunk = sentence[i:i + max_length]
+                if chunk:
+                    result.append(chunk)
+        return result

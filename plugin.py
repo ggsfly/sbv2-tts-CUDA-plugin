@@ -1,7 +1,8 @@
-"""SBV2 日文语音合成插件。
+"""Style-Bert-VITS2 (CUDA) 日文语音合成插件。
 
-本插件调用本地 SBV2 推理服务合成日文语音。SBV2 是日文推理模型，
-因此插件先调用 LLM 把用户输入翻译为自然日文，再送入本地推理服务合成。
+本插件调用本地 Style-Bert-VITS2 (CUDA) 推理服务合成日文语音。Style-Bert-VITS2
+是日文推理模型，因此插件先调用 LLM 把用户输入翻译为自然日文，再送入本地
+推理服务合成。
 
 触发面：
 - ``@Tool``：由 LLM 自主决定调用，对应 ``sbv2_tts_tool`` 组件；
@@ -10,39 +11,41 @@
 
 管线（Tool 与 Command 共用）：
 1. 文本清理（去除首尾空白）
-2. 长度校验，超出 ``general.max_text_length`` 时降级 / 发错误提示
-3. 智能分割：``|||SPLIT|||`` 标记优先切分 > ``TTSTextUtils.split_sentences`` > 单段
-4. 若 ``general.translate_to_japanese`` 开启，调用 :class:`JPTranslator` 把每段
-   中文译为日文（翻译失败时 **绝不** 用中文喂 SBV2）
-5. 对每段译文再走 ``TTSTextUtils.split_sentences`` 自动切分（避免单段过长）
-6. 调用 :class:`Sbv2Backend` 逐段合成，并通过 ``ctx.send.custom`` 把
-   ``voiceurl`` 投递到聊天流
+2. 智能分割：``|||SPLIT|||`` 标记优先切分 > ``TTSTextUtils.split_sentences`` > 单段
+3. 若 ``general.translate_to_japanese`` 开启，调用 :class:`JPTranslator` 把每段
+   中文译为日文（翻译失败时 **绝不** 用中文喂推理服务）
+4. 对每段译文再走 ``TTSTextUtils.split_sentences`` 自动切分，并用
+   ``clamp_sentences`` 保证每段不超过服务端 ``limit``（默认 100）
+5. 调用 :class:`VoiceBackend` 逐段合成，并通过 ``ctx.send.custom("voice", base64)``
+   把语音投递到聊天流
+
+LLM 调取（适配新版 SDK 2.x）
+---------------------------
+不再 import ``src.*``、不再自建固定编排器。统一走 ``ctx.llm.generate``：
+- 留空 → ``task_name="replyer"``
+- 命中可用任务名 → ``task_name=<值>``
+- 否则视为模型名/标识符 → ``task_name="replyer", model_name=<值>`` 直传 Host
+  解析；模型无效时 Host 报错，翻译失败如实暴露（不静默回退）。
 """
-
-import sys
-
-sys.dont_write_bytecode = True
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import aiohttp
 import asyncio
 import logging
-import os
 import re
-import tomllib
-from tomllib import TOMLDecodeError
+import sys
 
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
 
-import aiohttp
-
-from .backends import Sbv2Backend, TTSBackendRegistry
+from .backends import TTSBackendRegistry, VoiceBackend, VoiceProfile
 from .backends.base import TTSResult
-from .config_keys import ConfigKeys
 from .translate import JPTranslator
-from .utils.text import TTSTextUtils
 from .utils.session import TTSSessionManager
+from .utils.text import TTSTextUtils
+
+sys.dont_write_bytecode = True
 
 logger = logging.getLogger("plugin.sbv2_tts")
 
@@ -56,126 +59,12 @@ _VOICE_PLACEHOLDER_LINE_PATTERN = re.compile(r"^[ \t]*\[语音消息\][ \t]*(?:\
 # 智能分割标记，与 xuqian13_tts-voice-plugin 保持一致
 _SPLIT_MARKER = "|||SPLIT|||"
 
-# 后端注册表注册名（与 ``Sbv2Backend.backend_name`` 保持一致）
-_BACKEND_NAME = "sbv2"
+# 后端注册表注册名（与 ``VoiceBackend.backend_name`` 保持一致）
+_BACKEND_NAME = "voice"
 
-# 连接性探测目标（仅探测根路径；``/synthesize`` 才是合成入口）
-_PROBE_URL = "http://127.0.0.1:3000/"
-_PROBE_TIMEOUT_SECONDS = 3
-
-# ─── 模型名直连（参照 saberlights_smart-segmentation-plugin 的工程折中） ────
-# 插件 API（ctx.llm.generate）只支持任务名；要精确到 model_config.toml 的
-# 具体模型（[[models]].name / model_identifier），需借用宿主编排器。
-# 此 import 依赖 Runner 运行在宿主进程环境；失败时降级为任务名路径并告警。
-try:
-    from src.config.model_configs import TaskConfig as _HostTaskConfig
-    from src.llm_models.utils_model import LLMOrchestrator as _HostLLMOrchestrator
-
-    _HOST_ORCHESTRATOR_AVAILABLE = True
-except ImportError as _host_import_exc:  # pragma: no cover - 宿主环境差异
-    _HostTaskConfig = None
-    _HostLLMOrchestrator = None
-    _HOST_ORCHESTRATOR_AVAILABLE = False
-    logger.warning(
-        "无法导入宿主编排器（%s），translate_model 的模型名直填将回退为 replyer 任务执行",
-        _host_import_exc,
-    )
-
-# 宿主 model_config.toml 的 mtime 缓存，避免每次翻译都同步读盘
-_host_model_config_cache: Dict[str, Any] = {}
-_host_model_config_cache_mtime: Optional[float] = None
-
-
-def _find_host_model_config_path() -> str:
-    """定位宿主 model_config.toml（插件目录向上两级 = 宿主根）。"""
-
-    plugin_dir = os.path.dirname(os.path.abspath(__file__))
-    host_root = os.path.abspath(os.path.join(plugin_dir, "..", ".."))
-    return os.path.join(host_root, "config", "model_config.toml")
-
-
-def _load_host_model_config() -> Dict[str, Any]:
-    """按 mtime 缓存读取宿主 model_config.toml；读取失败返回上次缓存。"""
-
-    global _host_model_config_cache, _host_model_config_cache_mtime
-    if not _HOST_ORCHESTRATOR_AVAILABLE:
-        return _host_model_config_cache
-
-    config_path = _find_host_model_config_path()
-    try:
-        mtime = os.path.getmtime(config_path)
-    except OSError as exc:
-        logger.warning("读取宿主 model_config.toml 失败，无法做模型名映射: %s", exc)
-        return _host_model_config_cache
-
-    if _host_model_config_cache_mtime == mtime and _host_model_config_cache:
-        return _host_model_config_cache
-
-    try:
-        with open(config_path, "rb") as config_file:
-            config_data = tomllib.load(config_file)
-    except (OSError, TOMLDecodeError) as exc:
-        logger.warning("解析宿主 model_config.toml 失败，无法做模型名映射: %s", exc)
-        return _host_model_config_cache
-
-    if not isinstance(config_data, dict):
-        return _host_model_config_cache
-
-    _host_model_config_cache = config_data
-    _host_model_config_cache_mtime = mtime
-    return _host_model_config_cache
-
-
-def _resolve_host_model_name(value: str) -> str:
-    """把模型别名或 model_identifier 解析为宿主 ``[[models]].name``。
-
-    Args:
-        value: 用户配置的模型名或模型标识符。
-
-    Returns:
-        str: 宿主 models.name；未命中返回空串。
-    """
-
-    normalized = str(value or "").strip()
-    if not normalized:
-        return ""
-
-    raw_models = _load_host_model_config().get("models")
-    if not isinstance(raw_models, list):
-        return ""
-
-    for model_item in raw_models:
-        if not isinstance(model_item, dict):
-            continue
-        model_alias = str(model_item.get("name", "") or "").strip()
-        model_identifier = str(model_item.get("model_identifier", "") or "").strip()
-        if normalized in {model_alias, model_identifier}:
-            return model_alias or normalized
-    return ""
-
-
-if _HOST_ORCHESTRATOR_AVAILABLE:
-
-    class _PinnedTaskLLMOrchestrator(_HostLLMOrchestrator):
-        """固定使用指定模型列表的轻量调度器（钉死 TaskConfig）。"""
-
-        def __init__(self, task_config: Any, request_type: str = "") -> None:
-            self._pinned_task_config = task_config
-            super().__init__(task_name="planner", request_type=request_type)
-
-        def _get_task_config_or_raise(self) -> Any:
-            return self._pinned_task_config
-
-        def _refresh_task_config(self) -> Any:
-            latest = self._pinned_task_config
-            if latest is not self.model_for_task:
-                self.model_for_task = latest
-            if list(self.model_usage.keys()) != latest.model_list:
-                self.model_usage = {
-                    model: self.model_usage.get(model, (0, 0, 0))
-                    for model in latest.model_list
-                }
-            return self.model_for_task
+# 连接性探测目标：Style-Bert-VITS2 的 /models/info（GET，返回已加载模型信息）
+_PROBE_URL = "http://127.0.0.1:5000/models/info"
+_PROBE_TIMEOUT_SECONDS = 5
 
 
 # ─── 配置模型 ────────────────────────────────────────────────────────────
@@ -189,7 +78,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="1.0.0", description="配置版本")
+    config_version: str = Field(default="2.0.0", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -200,13 +89,11 @@ class GeneralConfig(PluginConfigBase):
     __ui_order__ = 1
 
     timeout: int = Field(default=60, description="请求超时（秒）")
-    max_text_length: int = Field(default=200, description="单次合成的最大文本长度")
-    use_base64_audio: bool = Field(
-        default=True,
+    max_text_length: int = Field(
+        default=100,
         description=(
-            "音频投递方式。true=base64 走 ctx.send.custom(\"voice\") 通道（MaiBot 官方识别的语音类型，推荐）；"
-            "false=文件路径走 \"voiceurl\" 自定义类型，MaiBot 发送层不识别该类型，"
-            "会掉进 DictComponent 兜底导致适配器无法渲染成语音（snowluma 适配器实测失败，NapCat 未经测试）。"
+            "单段合成文本的最大字符数，对齐 Style-Bert-VITS2 服务端 limit（默认 100）。"
+            "超长段落会被自动二次切分，避免触发服务端 422。"
         ),
     )
     strip_voice_placeholder: bool = Field(
@@ -222,21 +109,20 @@ class GeneralConfig(PluginConfigBase):
     send_error_messages: bool = Field(default=True, description="是否向聊天流回显错误提示")
     translate_to_japanese: bool = Field(
         default=True,
-        description="是否先把中文翻译为日文再合成（SBV2 为日文推理模型）",
+        description="是否先把中文翻译为日文再合成（Style-Bert-VITS2 为日文推理模型）",
     )
     translate_model: str = Field(
         default="",
         description=(
-            "翻译用 LLM，支持三种填法（按顺序解析，命中即用）："
-            "① 任务名（replyer / planner / utils / memory / mid_memory / learner / "
-            "expression_use / emoji / vlm / voice / embedding）；"
-            "② 模型名（model_config.toml 中 [[models]] 的 name）；"
-            "③ 模型标识符（[[models]] 的 model_identifier）。"
-            "留空 = replyer 任务。"
+            "翻译用 LLM，支持两种填法："
+            "① 任务名（replyer / utils / planner / memory 等）；"
+            "② 模型名 / 模型标识符（model_config.toml 中 [[models]] 的 name 或 model_identifier）。"
+            "留空 = replyer 任务。命中任务名按任务调用；否则视为模型名直传 Host 解析，"
+            "模型无效时翻译失败如实暴露。"
         ),
         json_schema_extra={
             "hint": (
-                "可填任务名（replyer/utils/planner 等）、模型名或模型标识符（如 "
+                "可填任务名（replyer/utils/planner 等）或模型名/标识符（如 "
                 "gemini-3.7-flash-low）。留空使用 replyer 任务。翻译是小任务，"
                 "推荐 utils 或快速小模型。"
             ),
@@ -255,43 +141,51 @@ class ComponentsConfig(PluginConfigBase):
     command_enabled: bool = Field(default=True, description="是否启用 Command 组件")
 
 
-class Sbv2Config(PluginConfigBase):
-    """SBV2 推理服务配置。"""
+class VoiceConfig(PluginConfigBase):
+    """Style-Bert-VITS2 推理服务配置。"""
 
-    __ui_label__ = "SBV2"
-    __ui_icon__ = "server"
+    __ui_label__ = "音色"
+    __ui_icon__ = "mic"
     __ui_order__ = 3
 
-    api_url: str = Field(default="http://127.0.0.1:3000/synthesize", description="SBV2 推理服务地址")
-    default_ident: str = Field(default="Ling v2", description="默认说话人")
-    idents: List[str] = Field(
-        default_factory=lambda: ["Ling v2", "Fusetsu_v1.5"],
-        description="可选说话人列表",
+    api_url: str = Field(
+        default="http://127.0.0.1:5000/voice",
+        description="Style-Bert-VITS2 API 地址，需指向 /voice 端点",
+    )
+    default_voice: str = Field(default="Ling v2", description="默认音色名（取自 voices 列表）")
+    language: str = Field(default="JP", description="文本语言：JP / EN / ZH")
+    length: float = Field(default=1.0, description="语速，基准 1.0，越大越慢")
+    voices: List[VoiceProfile] = Field(
+        default_factory=lambda: [
+            VoiceProfile(name="Ling v2", model="Ling-v2", speaker="Ling v2", style="Neutral"),
+            VoiceProfile(name="Fusetsu_v1.5", model="Fusetsu-v1.5", speaker="Fusetsu_v1.5", style="Neutral"),
+        ],
+        description="可选音色档案列表；-v 参数与 default_voice 从该列表按 name 匹配",
     )
 
 
 class SBV2TTSPluginConfig(PluginConfigBase):
-    """SBV2 日文语音合成插件总配置。"""
+    """Style-Bert-VITS2 日文语音合成插件总配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     components: ComponentsConfig = Field(default_factory=ComponentsConfig)
-    sbv2: Sbv2Config = Field(default_factory=Sbv2Config)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
 
 
 # ─── 插件主体 ────────────────────────────────────────────────────────────
 
 
-class Sbv2TTSPlugin(MaiBotPlugin):
-    """SBV2 日文语音合成插件（MaiBot SDK 2.x 版）。
+class SBV2TTSPlugin(MaiBotPlugin):
+    """Style-Bert-VITS2 (CUDA) 日文语音合成插件（MaiBot SDK 2.x 版）。
 
-    由 Tool / Command 共同驱动 SBV2 推理服务的 ``/synthesize`` 接口，
+    由 Tool / Command 共同驱动 Style-Bert-VITS2 服务的 ``/voice`` 接口，
     并通过 :meth:`_send_in_segments` 把多段语音依次投递到当前聊天流。
     """
 
     config_model = SBV2TTSPluginConfig
 
-    # 可用 LLM 任务名缓存（进程内一次；None=未拉取）。由 _resolve_translate_model 维护。
+    # 可用 LLM 任务名缓存（进程内一次；None=未拉取）。由 _resolve_translate_llm 维护。
     _available_task_names: Optional[frozenset] = None
 
     # ─── 生命周期 ────────────────────────────────────────────────────────
@@ -299,13 +193,12 @@ class Sbv2TTSPlugin(MaiBotPlugin):
     async def on_load(self) -> None:
         """插件加载钩子。
 
-        1. 用 aiohttp 短超时探测 SBV2 服务存活（任意状态码均视为存活，
-           仅连接被拒 / 超时 / DNS 失败视为未连通）。
+        1. 短超时探测 Style-Bert-VITS2 服务存活（GET /models/info）。
         2. 按 ``[components]`` 配置禁用 Tool / Command 组件。
         3. 不阻断插件加载：未连通只发 warning。
         """
 
-        await self._probe_sbv2_service()
+        await self._probe_service()
 
         if not self.config.components.tool_enabled:
             await self.ctx.component.disable_component(
@@ -322,7 +215,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             self.ctx.logger.info("SBV2 Command 组件已按配置禁用")
 
         self.ctx.logger.info(
-            "SBV2 日文 TTS 插件已加载，已注册后端=%s",
+            "Style-Bert-VITS2 日文 TTS 插件已加载，已注册后端=%s",
             TTSBackendRegistry.list_backends(),
         )
 
@@ -331,7 +224,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
 
         session_manager = await TTSSessionManager.get_instance()
         await session_manager.close_session()
-        self.ctx.logger.info("SBV2 日文 TTS 插件已卸载")
+        self.ctx.logger.info("Style-Bert-VITS2 日文 TTS 插件已卸载")
 
     async def on_config_update(
         self,
@@ -339,13 +232,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         config_data: Dict[str, Any],
         version: str,
     ) -> None:
-        """配置热更新回调。
-
-        Args:
-            scope: 配置变更范围。
-            config_data: 最新配置数据。
-            version: 配置版本号。
-        """
+        """配置热更新回调。"""
 
         del scope
         del config_data
@@ -400,11 +287,11 @@ class Sbv2TTSPlugin(MaiBotPlugin):
 
     # ─── 内部：连接性探测 ────────────────────────────────────────────────
 
-    async def _probe_sbv2_service(self) -> None:
-        """短超时探测 SBV2 服务存活。
+    async def _probe_service(self) -> None:
+        """短超时探测 Style-Bert-VITS2 服务存活。
 
-        任意 HTTP 状态码（404 / 405 / 422 等）都视为"服务监听中"，仅
-        连接被拒 / 超时 / DNS 失败视为未连通。未连通仅 warning，不抛错。
+        任意 HTTP 状态码都视为"服务监听中"，仅连接被拒 / 超时 / DNS 失败视为
+        未连通。未连通仅 warning，不抛错。
         """
 
         try:
@@ -413,17 +300,15 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             ) as session:
                 try:
                     async with session.get(_PROBE_URL) as resp:
-                        # 任何状态码都说明 TCP 握手成功 + 服务在监听
                         del resp
                 except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
                     self.ctx.logger.warning(
-                        "SBV2 服务未连通，路径=%s，原因=%s",
+                        "Style-Bert-VITS2 服务未连通，路径=%s，原因=%s",
                         _PROBE_URL, exc,
                     )
         except (aiohttp.ClientError, OSError) as exc:
-            # ClientSession 构造阶段就失败（极少见），同样只 warning
             self.ctx.logger.warning(
-                "SBV2 服务未连通，路径=%s，原因=%s",
+                "Style-Bert-VITS2 服务未连通，路径=%s，原因=%s",
                 _PROBE_URL, exc,
             )
 
@@ -435,12 +320,8 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         backends 模块基于 ``config_getter(key, default)`` 读取配置，
         这里把 Pydantic 嵌套配置展开成扁平访问。
 
-        特殊处理：``general.audio_output_dir``（``ConfigKeys._GENERAL_AUDIO_OUTPUT_DIR``）
-        不在 Pydantic 模型里，直接返回 :class:`PluginPaths.runtime_dir` 的字符串。
-        这样 backends 的 ``send_audio`` 能把临时音频落到运行时目录下。
-
         Args:
-            key: 形如 ``"sbv2.api_url"`` 的扁平配置键。
+            key: 形如 ``"voice.api_url"`` 的扁平配置键。
             default: 当配置不存在时返回的默认值。
 
         Returns:
@@ -449,10 +330,6 @@ class Sbv2TTSPlugin(MaiBotPlugin):
 
         if "." not in key:
             return default
-
-        # 音频输出目录桥接到运行时目录，不走 Pydantic
-        if key == "general.audio_output_dir":
-            return str(self.ctx.paths.runtime_dir)
 
         section_name, _, field_name = key.partition(".")
         section = getattr(self.config, section_name, None)
@@ -467,8 +344,8 @@ class Sbv2TTSPlugin(MaiBotPlugin):
     def _make_send_custom(self, stream_id: str) -> Callable[..., Any]:
         """构造发送自定义消息的闭包。
 
-        backends 通过 ``set_send_custom`` 注入该闭包，
-        把 ``voice`` / ``voiceurl`` 投到当前聊天流。
+        backends 通过 ``set_send_custom`` 注入该闭包，把 ``voice`` base64
+        投到当前聊天流。
 
         Args:
             stream_id: 当前聊天流 ID，由 Tool / Command handler 注入。
@@ -499,14 +376,14 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         stream_id: str,
         log_prefix: str,
     ) -> Any:
-        """创建 SBV2 后端实例并注入 ``send_custom`` 闭包。
+        """创建 Voice 后端实例并注入 ``send_custom`` 闭包。
 
         Args:
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
 
         Returns:
-            :class:`Sbv2Backend` 实例，或未注册时返回 ``None``。
+            :class:`VoiceBackend` 实例，或未注册时返回 ``None``。
         """
 
         backend = TTSBackendRegistry.create(
@@ -523,15 +400,15 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         text: str,
         stream_id: str,
         log_prefix: str,
-        voice: str = "",
+        voice: Optional[VoiceProfile] = None,
     ) -> TTSResult:
-        """调用 SBV2 后端合成一段文本。
+        """调用 Voice 后端合成一段文本。
 
         Args:
             text: 待合成日文文本。
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
-            voice: 音色 ident；空串则用 ``sbv2.default_ident``。
+            voice: 音色档案；None 时后端用默认档案。
 
         Returns:
             :class:`TTSResult`。后端未注册时返回失败结果。
@@ -569,41 +446,35 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         if not self.config.general.translate_to_japanese:
             return True, text
 
-        kind, task_name, model_name = await self._resolve_translate_model()
+        task_name, model_name = await self._resolve_translate_llm()
         translator = JPTranslator(
             max_length=self.config.general.max_text_length,
         )
-        if kind == "model":
-            llm_callback = self._make_pinned_llm_callback(model_name)
-        else:
-            llm_callback = self.ctx.llm.generate
         return await translator.translate(
             text,
             log_prefix,
-            llm_callback,
-            translate_model=task_name,
+            self.ctx.llm.generate,
+            task_name=task_name,
+            model_name=model_name,
         )
 
-    async def _resolve_translate_model(self) -> Tuple[str, str, str]:
-        """把 ``translate_model`` 配置解析为 (类别, 任务名, 模型名)。
+    async def _resolve_translate_llm(self) -> Tuple[str, str]:
+        """把 ``translate_model`` 配置解析为 ``(task_name, model_name)``。
 
-        规则（解析顺序即优先级）：
-        - 留空 → ``("task", "replyer", "")``。绝不能把空任务名发给 Host：
-          Host 对空任务名取 ``model_task_config`` 的字母序首个任务
-          （embedding），用聊天请求打 embedding 模型会得到 404 Not Found。
-        - 值是已注册任务名（replyer/utils/...）→ ``("task", 值, "")``。
-        - 值命中宿主 ``[[models]]`` 的 name 或 model_identifier →
-          ``("model", "replyer", models.name)``，经宿主编排器直连该模型。
-        - 都未命中 → 告警并回退 ``("task", "replyer", "")``。
+        规则：
+        - 留空 → ``("replyer", "")``。绝不能把空任务名发给 Host：
+          旧版空任务名会取字母序首个任务（embedding），打聊天请求会 404。
+        - 值是已注册任务名 → ``(值, "")``，按任务路由。
+        - 否则视为模型名/标识符 → ``("replyer", 值)``，直传 Host 解析；
+          模型无效时 Host 报错，翻译失败如实暴露，**不静默回退**。
 
         Returns:
-            Tuple[str, str, str]: ``(kind, task_name, model_name)``，
-            ``kind`` 取值 ``"task"`` 或 ``"model"``。
+            Tuple[str, str]: ``(task_name, model_name)``。
         """
 
         raw = (self.config.general.translate_model or "").strip()
         if not raw:
-            return "task", "replyer", ""
+            return "replyer", ""
 
         if self._available_task_names is None:
             try:
@@ -615,62 +486,21 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                     "已缓存可用 LLM 任务名: %s", sorted(self._available_task_names),
                 )
             except Exception as exc:
-                # 拉取失败时不写缓存（保持 None），下次调用重试；本次继续走
-                # 宿主模型表匹配，最终回退 replyer。
+                # 拉取失败不写缓存（保持 None），下次调用重试；本次视为模型名直传。
                 self.ctx.logger.warning(
-                    "获取可用 LLM 任务名列表失败 (%s)，translate_model 将按宿主模型表匹配",
+                    "获取可用 LLM 任务名列表失败 (%s)，translate_model 将按模型名直传 Host",
                     exc,
                 )
                 self._available_task_names = frozenset()
 
         if raw in self._available_task_names:
-            return "task", raw, ""
+            return raw, ""
 
-        resolved_model_name = _resolve_host_model_name(raw)
-        if resolved_model_name and _HOST_ORCHESTRATOR_AVAILABLE:
-            self.ctx.logger.info(
-                "translate_model `%s` 已解析为宿主模型 `%s`，将直连该模型",
-                raw, resolved_model_name,
-            )
-            return "model", "replyer", resolved_model_name
-
-        self.ctx.logger.warning(
-            "translate_model `%s` 既不是可用任务名也未命中宿主模型表，回退 replyer 任务",
-            raw,
+        # 视为模型名/标识符，直传 Host 解析；无效即报错暴露
+        self.ctx.logger.info(
+            "translate_model `%s` 未命中任务名，将作为模型名直传 Host", raw,
         )
-        return "task", "replyer", ""
-
-    def _make_pinned_llm_callback(self, model_name: str) -> Callable[..., Any]:
-        """构造直连指定模型的 LLM 回调（签名兼容 JPTranslator 的 llm_generate）。"""
-
-        async def _pinned_generate(prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            """忽略回调透传的任务/模型参数，固定走宿主编排器直连模型。"""
-
-            del kwargs
-            max_tokens = max(256, min(self.config.general.max_text_length * 3, 1024))
-            orchestrator = _PinnedTaskLLMOrchestrator(
-                _HostTaskConfig(
-                    model_list=[model_name],
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                    slow_threshold=30.0,
-                    selection_strategy="random",
-                ),
-                request_type="plugin.sbv2_tts.translate",
-            )
-            result = await orchestrator.generate_response_async(
-                prompt=prompt,
-                temperature=0.3,
-                max_tokens=max_tokens,
-            )
-            return {
-                "success": True,
-                "response": result.response,
-                "reasoning": result.reasoning,
-                "model": result.model_name,
-            }
-
-        return _pinned_generate
+        return "replyer", raw
 
     # ─── 内部：分段发送 ──────────────────────────────────────────────────
 
@@ -679,7 +509,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         sentences: List[str],
         stream_id: str,
         log_prefix: str,
-        voice: str,
+        voice: Optional[VoiceProfile],
         split_delay: float,
     ) -> TTSResult:
         """逐段合成并投递。
@@ -691,7 +521,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             sentences: 待合成段落列表。
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
-            voice: 音色 ident。
+            voice: 音色档案。
             split_delay: 段落间隔秒数。
 
         Returns:
@@ -735,7 +565,6 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                     "%s 分段 %d/%d 合成成功", log_prefix, index + 1, total,
                 )
             else:
-                # 失败：记录 + 停止后续段
                 logger.error(
                     "%s 分段 %d/%d 合成失败: %s",
                     log_prefix, index + 1, total, result.message,
@@ -745,7 +574,6 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             if index < total - 1 and split_delay > 0:
                 await asyncio.sleep(split_delay)
 
-        # T8 验收依赖此日志字符串
         logger.info(
             "%s 成功发送 %d/%d 条语音",
             log_prefix, success_count, total,
@@ -774,22 +602,22 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         raw_text: str,
         stream_id: str,
         log_prefix: str,
-        voice: str,
+        voice: Optional[VoiceProfile],
     ) -> TTSResult:
         """翻译-合成管线的共享实现。
 
         步骤：
-        1. 文本清理 + 长度校验
+        1. 文本清理
         2. ``|||SPLIT|||`` 优先切分，否则按 ``split_sentences`` 自动切分
         3. 对每段中文翻译为日文（若开启）；失败的段会被丢弃
-        4. 对译文再按标点切分（避免单段过长）
+        4. 对译文再按标点切分 + ``clamp_sentences`` 保证每段不超过服务端 limit
         5. 逐段合成投递
 
         Args:
             raw_text: 原始输入文本。
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
-            voice: 音色 ident。
+            voice: 音色档案。
 
         Returns:
             :class:`TTSResult`。
@@ -811,20 +639,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 backend_name=_BACKEND_NAME,
             )
 
-        # 2. 长度校验：超长直接发错误提示，不静默截断
-        if len(clean_text) > max_length:
-            if send_errors:
-                await self.ctx.send.text(
-                    f"文本过长（{len(clean_text)}字符 > {max_length}），已取消合成",
-                    stream_id,
-                )
-            return TTSResult(
-                success=False,
-                message="文本过长",
-                backend_name=_BACKEND_NAME,
-            )
-
-        # 3. 智能分割：|||SPLIT||| 标记优先切分
+        # 2. 智能分割：|||SPLIT||| 标记优先切分
         if _SPLIT_MARKER in clean_text:
             segments = [
                 s.strip()
@@ -839,8 +654,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         if not segments:
             segments = [clean_text]
 
-        # 4. 单段 vs 多段翻译策略
-        # 单段时翻译一次；多段时逐段翻译（失败段丢弃，整体仍可继续）
+        # 3. 单段 vs 多段翻译策略
         translated_segments: List[str] = []
         first_failure_message: str = ""
         if len(segments) == 1:
@@ -865,7 +679,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 else:
                     if not first_failure_message:
                         first_failure_message = payload
-                    # 翻译失败的段丢弃，不送入 SBV2
+                    # 翻译失败的段丢弃，不送入推理服务
             if not translated_segments:
                 if send_errors:
                     await self.ctx.send.text(
@@ -878,13 +692,15 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                     backend_name=_BACKEND_NAME,
                 )
 
-        # 5. 对每段译文再切分（避免单段过长），并过滤空段
+        # 4. 对每段译文再切分（避免单段过长），并 clamp 到服务端 limit
         final_sentences: List[str] = []
         for translated in translated_segments:
             if self.config.general.split_sentences:
                 sub = TTSTextUtils.split_sentences(translated)
             else:
                 sub = [translated]
+            # 兜底：保证每段不超过 max_length（服务端 limit），否则会 422
+            sub = TTSTextUtils.clamp_sentences(sub, max_length)
             for s in sub:
                 s = s.strip()
                 if s:
@@ -897,7 +713,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 backend_name=_BACKEND_NAME,
             )
 
-        # 6. 逐段合成投递
+        # 5. 逐段合成投递
         return await self._send_in_segments(
             sentences=final_sentences,
             stream_id=stream_id,
@@ -911,8 +727,8 @@ class Sbv2TTSPlugin(MaiBotPlugin):
     @Tool(
         "sbv2_tts_tool",
         description=(
-            "用日文语音回复（SBV2 日文 TTS）：先调用 LLM 把中文译为日文，"
-            "再调用本地 SBV2 服务合成日文语音发送。"
+            "用日文语音回复（Style-Bert-VITS2 日文 TTS）：先调用 LLM 把中文译为日文，"
+            "再调用本地 Style-Bert-VITS2 服务合成日文语音发送。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -922,9 +738,9 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 required=True,
             ),
             ToolParameterInfo(
-                name="ident",
+                name="voice",
                 param_type=ToolParamType.STRING,
-                description="SBV2 模型标识，'Ling v2' 或 'Fusetsu_v1.5'，默认 'Ling v2'",
+                description="音色名，如 'Ling v2' 或 'Fusetsu_v1.5'，默认 'Ling v2'",
                 required=False,
                 default="Ling v2",
             ),
@@ -933,17 +749,15 @@ class Sbv2TTSPlugin(MaiBotPlugin):
     async def handle_tts_tool(
         self,
         text: str = "",
-        ident: str = "",
+        voice: str = "",
         stream_id: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """处理 LLM 自主调用的 TTS Tool。
 
-        ``stream_id`` 由 Host 注入；不暴露在 ``parameters`` 中。
-
         Args:
             text: 要转为日文语音的中文文本。
-            ident: SBV2 模型标识；空串则用默认音色。
+            voice: 音色名；空串则用配置中的默认音色。
             stream_id: 当前聊天流 ID（Host 注入）。
             **kwargs: 兼容其它 Host 注入字段。
 
@@ -957,15 +771,19 @@ class Sbv2TTSPlugin(MaiBotPlugin):
         if not stream_id:
             return {"success": False, "message": "缺少 stream_id，无法发送"}
 
-        # 解析音色（ident 必须在 sbv2.idents 列表里，否则回退到默认）
-        voice: str = self._resolve_voice(ident)
+        try:
+            profile = self._resolve_voice(voice)
+        except ValueError as exc:
+            if self.config.general.send_error_messages:
+                await self.ctx.send.text(str(exc), stream_id)
+            return {"success": False, "message": str(exc)}
 
         try:
             result = await self._run_pipeline(
                 raw_text=text,
                 stream_id=stream_id,
                 log_prefix=log_prefix,
-                voice=voice,
+                voice=profile,
             )
             return {"success": result.success, "message": result.message}
         except asyncio.TimeoutError:
@@ -1001,20 +819,20 @@ class Sbv2TTSPlugin(MaiBotPlugin):
 
     @Command(
         "sbv2_tts_command",
-        description="将文本转换为日文语音（SBV2）",
-        pattern=r"^/(?:sbv2|voice)\s+(?P<text>.+?)(?:\s+-v\s+(?P<ident>\S+))?$",
+        description="将文本转换为日文语音（Style-Bert-VITS2）",
+        pattern=r"^/(?:sbv2|voice)\s+(?P<text>.+?)(?:\s+-v\s+(?P<voice>.+))?$",
     )
     async def handle_tts_command(
         self,
         stream_id: str = "",
         matched_groups: Any = None,
         **kwargs: Any,
-    ) -> Tuple[bool, str, bool]:
+    ) -> Tuple[bool, str, int]:
         """处理 ``/sbv2`` / ``/voice`` 命令。
 
         命中 ``text.lower() == "help"`` 时发帮助文本并返回成功；
         空文本时发错误提示。返回三元组 ``(success, message, intercept)``，
-        ``intercept=True`` 表示拦截该消息不再向下传递。
+        ``intercept`` 为 1 表示拦截该消息不再向下传递。
 
         Args:
             stream_id: 当前聊天流 ID（Host 注入）。
@@ -1022,7 +840,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             **kwargs: 兼容其它 Host 注入字段。
 
         Returns:
-            Tuple[bool, str, bool]: ``(success, message, intercept)``。
+            Tuple[bool, str, int]: ``(success, message, intercept)``。
         """
 
         del kwargs
@@ -1031,33 +849,33 @@ class Sbv2TTSPlugin(MaiBotPlugin):
             matched_groups if isinstance(matched_groups, dict) else {}
         )
         user_text = (groups.get("text") or "").strip()
-        user_ident = (groups.get("ident") or "").strip()
+        user_voice = (groups.get("voice") or "").strip()
 
         try:
             if not stream_id:
-                return False, "缺少 stream_id", True
+                return False, "缺少 stream_id", 1
 
             if user_text.lower() == "help":
                 await self._send_help(stream_id)
-                return True, "显示帮助信息", True
+                return True, "显示帮助信息", 1
 
             if not user_text:
                 if self.config.general.send_error_messages:
                     await self.ctx.send.text(
                         "请输入要转换为语音的文本内容", stream_id,
                     )
-                return False, "缺少文本内容", True
+                return False, "缺少文本内容", 1
 
-            voice: str = self._resolve_voice(user_ident)
+            profile = self._resolve_voice(user_voice)
 
             result = await self._run_pipeline(
                 raw_text=user_text,
                 stream_id=stream_id,
                 log_prefix=log_prefix,
-                voice=voice,
+                voice=profile,
             )
 
-            return result.success, result.message, True
+            return result.success, result.message, 1
         except asyncio.TimeoutError:
             timeout_sec = self.config.general.timeout
             self.ctx.logger.error(
@@ -1067,7 +885,7 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 await self.ctx.send.text(
                     f"语音合成超时（{timeout_sec}s）", stream_id,
                 )
-            return False, "timeout", True
+            return False, "timeout", 1
         except (aiohttp.ClientError, ConnectionError) as exc:
             self.ctx.logger.error(
                 "%s TTS 命令网络错误: %s", log_prefix, exc,
@@ -1076,8 +894,18 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 await self.ctx.send.text(
                     f"语音合成网络错误: {type(exc).__name__}", stream_id,
                 )
-            return False, str(exc), True
-        except (KeyError, AttributeError, ValueError) as exc:
+            return False, str(exc), 1
+        except ValueError as exc:
+            # _resolve_voice 抛出的未知音色错误
+            self.ctx.logger.error(
+                "%s TTS 命令参数错误: %s", log_prefix, exc,
+            )
+            if self.config.general.send_error_messages:
+                await self.ctx.send.text(
+                    f"语音合成参数错误: {exc}", stream_id,
+                )
+            return False, str(exc), 1
+        except (KeyError, AttributeError) as exc:
             self.ctx.logger.error(
                 "%s TTS 命令参数错误: %s", log_prefix, exc, exc_info=True,
             )
@@ -1085,46 +913,63 @@ class Sbv2TTSPlugin(MaiBotPlugin):
                 await self.ctx.send.text(
                     f"语音合成参数错误: {exc}", stream_id,
                 )
-            return False, str(exc), True
+            return False, str(exc), 1
 
     # ─── 内部：音色解析 / 帮助 ───────────────────────────────────────────
 
-    def _resolve_voice(self, ident: str) -> str:
-        """解析音色 ident。
+    def _resolve_voice(self, voice_name: str) -> VoiceProfile:
+        """解析音色名到 :class:`VoiceProfile`。
 
-        命中 ``sbv2.idents`` 列表则原样返回；否则回退到 ``sbv2.default_ident``。
+        命中 ``voice.voices`` 列表中的 ``name`` 则返回该档案；空串返回
+        ``default_voice`` 对应档案；未命中 **抛 ValueError** 如实暴露，
+        并在消息中列出可选音色（符合 AGENTS"不无脑兜底"原则）。
 
         Args:
-            ident: 用户传入的音色标识。
+            voice_name: 用户/LLM 传入的音色名。
 
         Returns:
-            str: 最终使用的音色标识。
+            :class:`VoiceProfile`。
+
+        Raises:
+            ValueError: 音色名未命中配置列表。
         """
 
-        default_ident: str = self.config.sbv2.default_ident
-        idents: List[str] = list(self.config.sbv2.idents or [])
-        if ident and idents and ident in idents:
-            return ident
-        return default_ident
+        voices: List[VoiceProfile] = list(self.config.voice.voices or [])
+        # 空名 → 默认音色
+        target = (voice_name or "").strip() or self.config.voice.default_voice
+
+        for profile in voices:
+            if profile.name == target:
+                return profile
+
+        available = "、".join(p.name for p in voices) or "（未配置任何音色）"
+        raise ValueError(
+            f"未知音色: {target or '<空>'}，可选: {available}"
+        )
 
     async def _send_help(self, stream_id: str) -> None:
         """发送 ``/sbv2 help`` 帮助文本。"""
 
-        default_ident: str = self.config.sbv2.default_ident
+        voices: List[VoiceProfile] = list(self.config.voice.voices or [])
+        voice_lines = "\n".join(
+            f"  - {p.name}（model={p.model}, speaker={p.speaker}, style={p.style}）"
+            for p in voices
+        ) or "  （未配置任何音色）"
+
         help_text = (
-            "【SBV2 日文语音合成插件帮助】\n\n"
+            "【Style-Bert-VITS2 日文语音合成插件帮助】\n\n"
             "📝 基本语法：\n"
-            "/sbv2 <文本> [-v <音色>]\n"
-            "/voice <文本> [-v <音色>]   # /sbv2 的别名\n\n"
-            "🎵 可选音色（取自 [sbv2].idents）：\n"
-            "  - Ling v2（默认）\n"
-            "  - Fusetsu_v1.5\n"
-            f"当前配置默认音色：{default_ident}\n\n"
+            "/sbv2 <文本> [-v <音色名>]\n"
+            "/voice <文本> [-v <音色名>]   # /sbv2 的别名\n\n"
+            "🎵 可选音色（取自 [voice].voices）：\n"
+            f"{voice_lines}\n"
+            f"当前默认音色：{self.config.voice.default_voice}\n\n"
             "🌐 翻译机制：\n"
-            "插件默认先把中文翻译为日文，再送入本地 SBV2 推理合成。"
+            "插件默认先把中文翻译为日文，再送入本地 Style-Bert-VITS2 推理合成。"
             "若 translate_to_japanese = false，则跳过翻译。\n\n"
             "✂️ 智能分割：\n"
-            "文本中包含 |||SPLIT||| 时按标记精确分段；否则按句末标点自动切分。\n\n"
+            "文本中包含 |||SPLIT||| 时按标记精确分段；否则按句末标点自动切分，"
+            "并对超长段落按服务端 limit（默认 100 字符）二次切分。\n\n"
             "📌 示例：\n"
             "/sbv2 你好世界\n"
             "/sbv2 今天的天气真不错 -v Fusetsu_v1.5\n"
@@ -1135,15 +980,15 @@ class Sbv2TTSPlugin(MaiBotPlugin):
 
 # ─── 后端注册 ────────────────────────────────────────────────────────────
 
-# 在模块导入阶段就把 SBV2 后端注册到注册表，保证 ``create_plugin()`` 时可用。
-TTSBackendRegistry.register(_BACKEND_NAME, Sbv2Backend)
+# 在模块导入阶段就把 Voice 后端注册到注册表，保证 ``create_plugin()`` 时可用。
+TTSBackendRegistry.register(_BACKEND_NAME, VoiceBackend)
 
 
-def create_plugin() -> Sbv2TTSPlugin:
-    """创建 SBV2 日文语音合成插件实例（SDK 入口）。
+def create_plugin() -> SBV2TTSPlugin:
+    """创建 Style-Bert-VITS2 日文语音合成插件实例（SDK 入口）。
 
     Returns:
-        Sbv2TTSPlugin: 新的插件实例。
+        SBV2TTSPlugin: 新的插件实例。
     """
 
-    return Sbv2TTSPlugin()
+    return SBV2TTSPlugin()

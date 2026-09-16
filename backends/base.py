@@ -4,24 +4,20 @@ TTS 后端抽象基类与注册表。
 设计要点：
 - 精简移植自 ``xuqian13_tts-voice-plugin.backends.base``；
 - 所有 TTS 后端必须继承 ``TTSBackendBase`` 并实现 ``execute``；
-- ``send_audio`` 统一处理 base64 与文件路径两种投递模式；
-- 输出目录 ``output_dir`` 由调用方显式传入，避免在跨平台 / Docker 环境下误判项目根目录。
+- ``send_audio`` 统一走 base64 + ``ctx.send.custom("voice")`` 通道，
+  不再支持文件路径 / ``voiceurl`` 模式（MaiBot 发送层不识别该自定义类型）；
+- 输出目录由调用方按需处理，本基类不落盘。
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Optional, Type
 
-import asyncio
 import logging
 
 from ..utils.file import TTSFileManager
 
 logger = logging.getLogger("plugin.sbv2_tts.backend")
-
-# 本插件内部使用的扁平配置键（与 xuqian13 插件保持一致命名，便于阅读）
-_GENERAL_USE_BASE64_AUDIO: str = "general.use_base64_audio"
-_GENERAL_AUDIO_OUTPUT_DIR: str = "general.audio_output_dir"
 
 
 @dataclass
@@ -31,13 +27,11 @@ class TTSResult:
     Attributes:
         success: 是否成功合成并完成投递。
         message: 描述信息，供日志或向用户回复使用。
-        audio_path: 音频文件路径（文件模式下填充，base64 模式下为 None）。
         backend_name: 实际生效的后端名称，便于多后端场景下溯源。
     """
 
     success: bool
     message: str
-    audio_path: Optional[str] = None
     backend_name: str = ""
 
     def __iter__(self):
@@ -84,103 +78,44 @@ class TTSBackendBase(ABC):
     async def send_audio(
         self,
         audio_data: bytes,
-        audio_format: str = "wav",
-        prefix: str = "tts",
         voice_info: str = "",
     ) -> TTSResult:
         """
-        统一的音频发送方法。
-
-        根据 ``general.use_base64_audio`` 配置决定走 ``voice``(base64) 还是
-        ``voiceurl``(文件路径) 通道；文件模式下会安排 180 秒延迟清理。
+        把音频二进制编码为 base64 后通过 ``voice`` 通道发送。
 
         Args:
-            audio_data: 音频二进制数据。
-            audio_format: 音频扩展名（不含点号），如 ``wav`` / ``mp3``。
-            prefix: 文件名前缀，用于区分后端或场景。
+            audio_data: 音频二进制数据（WAV）。
             voice_info: 音色信息（用于日志与用户提示）。
 
         Returns:
             :class:`TTSResult`。
         """
-        # 是否走 base64 模式
-        use_base64 = bool(self.get_config(_GENERAL_USE_BASE64_AUDIO, False))
         logger.debug(
-            "%s 开始发送音频 (原始大小: %d字节, 格式: %s)",
-            self.log_prefix, len(audio_data), audio_format,
+            "%s 开始发送音频 (原始大小: %d字节)",
+            self.log_prefix, len(audio_data),
         )
 
-        if use_base64:
-            # base64 模式：直接把音频编码后通过 voice 通道发送
-            base64_audio = TTSFileManager.audio_to_base64(audio_data)
-            if not base64_audio:
-                return TTSResult(
-                    False, "音频数据转base64失败", backend_name=self.backend_name
-                )
-
-            logger.debug("%s base64编码完成，准备通过send_custom发送", self.log_prefix)
-            if self._send_custom:
-                await self._send_custom(message_type="voice", content=base64_audio)
-                logger.info(
-                    "%s 语音已通过send_custom发送 "
-                    "(%s, 音频大小: %d字节)",
-                    self.log_prefix,
-                    'base64模式' if use_base64 else '文件路径模式',
-                    len(audio_data),
-                )
-            else:
-                logger.warning("%s send_custom未设置，无法发送语音", self.log_prefix)
-                return TTSResult(
-                    False, "send_custom回调未设置", backend_name=self.backend_name
-                )
-
+        base64_audio = TTSFileManager.audio_to_base64(audio_data)
+        if not base64_audio:
             return TTSResult(
-                success=True,
-                message=(
-                    f"成功发送{self.backend_name}语音"
-                    f"{(' ('+voice_info+')') if voice_info else ''}, base64模式"
-                ),
-                backend_name=self.backend_name,
+                False, "音频数据转base64失败", backend_name=self.backend_name
             )
 
-        # 文件路径模式：写入临时文件后通过 voiceurl 通道发送
-        output_dir = self.get_config(_GENERAL_AUDIO_OUTPUT_DIR, "")
-        audio_path = TTSFileManager.generate_temp_path(
-            prefix=prefix,
-            suffix=f".{audio_format}",
-            output_dir=output_dir,
-        )
-
-        if not await TTSFileManager.write_audio_async(audio_path, audio_data):
-            return TTSResult(
-                False, "保存音频文件失败", backend_name=self.backend_name
-            )
-
-        logger.debug("%s 音频文件已保存, 路径: %s", self.log_prefix, audio_path)
-        if self._send_custom:
-            await self._send_custom(message_type="voiceurl", content=audio_path)
-            logger.info(
-                "%s 语音已通过send_custom发送 "
-                "(%s, 音频大小: %d字节)",
-                self.log_prefix,
-                'base64模式' if use_base64 else '文件路径模式',
-                len(audio_data),
-            )
-            # 延迟清理临时文件：给 adapter 上传到 QQ 留充足时间，避免在慢传场景下被提前删除
-            asyncio.create_task(TTSFileManager.cleanup_file_async(audio_path, delay=180))
-        else:
+        if self._send_custom is None:
             logger.warning("%s send_custom未设置，无法发送语音", self.log_prefix)
             return TTSResult(
                 False, "send_custom回调未设置", backend_name=self.backend_name
             )
 
+        await self._send_custom(message_type="voice", content=base64_audio)
+        logger.info(
+            "%s 语音已通过send_custom发送 (base64模式, 音频大小: %d字节%s)",
+            self.log_prefix, len(audio_data),
+            f", 音色: {voice_info}" if voice_info else "",
+        )
         return TTSResult(
             success=True,
-            message=(
-                f"成功发送{self.backend_name}语音"
-                f"{(' ('+voice_info+')') if voice_info else ''}"
-            ),
-            audio_path=audio_path,
+            message=f"成功发送{self.backend_name}语音{(' (' + voice_info + ')') if voice_info else ''}",
             backend_name=self.backend_name,
         )
 
@@ -188,7 +123,7 @@ class TTSBackendBase(ABC):
     async def execute(
         self,
         text: str,
-        voice: Optional[str] = None,
+        voice: Any = None,
         **kwargs: Any,
     ) -> TTSResult:
         """
@@ -196,7 +131,7 @@ class TTSBackendBase(ABC):
 
         Args:
             text: 待转换的文本。
-            voice: 音色/风格标识；子类自行决定如何解释与回退。
+            voice: 音色信息（具体类型由子类约定）。
             **kwargs: 其他后端特定参数。
 
         Returns:
@@ -204,13 +139,9 @@ class TTSBackendBase(ABC):
         """
         raise NotImplementedError
 
-    def validate_config(self) -> Tuple[bool, str]:
+    def validate_config(self) -> tuple:
         """验证后端配置是否完整。默认放行；具体后端按需覆盖。"""
         return True, ""
-
-    def get_default_voice(self) -> str:
-        """获取默认音色标识。默认空串，子类按需覆盖。"""
-        return ""
 
     def is_available(self) -> bool:
         """检查后端是否可用。"""
@@ -223,7 +154,7 @@ class TTSBackendRegistry:
     TTS 后端注册表。
 
     策略模式 + 工厂模式：后端类通过 :meth:`register` 注册到 ``_backends``，
-    由 :meth:`create` 按名称实例化。本插件当前只实现 SBV2 单后端，注册表
+    由 :meth:`create` 按名称实例化。本插件当前只实现 Voice 单后端，注册表
     机制保留以便后续扩展更多本地推理后端。
     """
 

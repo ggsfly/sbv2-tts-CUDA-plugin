@@ -1,38 +1,46 @@
 """中文到日文的翻译层。
 
-SBV2 是日文推理模型，直接传入中文会输出乱码，
+Style-Bert-VITS2 是日文推理模型，直接传入中文会输出乱码，
 因此在送入合成前需要先把中文原文翻译成自然日文。
 
 设计要点
 --------
-本模块不依赖 ``maibot_sdk``，``llm_generate`` 由 plugin 注入（T6 在
-``plugin.py`` 里把 ``self.ctx.llm.generate`` 作为回调传进来）。
+本模块不依赖 ``maibot_sdk``，``llm_generate`` 由 plugin 注入。
 这样做有两个好处：
 
 1. ``translate.py`` 完全是标准库，便于单元测试时塞一个假函数即可跑通。
-2. 上层 plugin 可以控制 LLM 客户端的生命周期（关闭、超时、模型选择），
-   翻译层只关心"输入 prompt、拿到译文或错误"。
+2. 上层 plugin 可以控制 LLM 的生命周期与任务/模型选择，翻译层只关心
+   "输入 prompt、拿到译文或错误"。
+
+新版 SDK 调取方式
+-----------------
+SDK 2.x 的 ``ctx.llm.generate`` 同时接受 ``task_name``（任务名）与
+``model_name``（具体模型名/标识符）。本模块把二者作为显式参数透传，
+上层负责解析配置后注入：
+
+- 留空 / 任务名 → 走任务路由；
+- 模型名 / model_identifier → 直传 Host 解析；模型无效时 Host 报错，
+  翻译失败如实暴露，**绝不静默回退到中文原文**。
 
 失败语义（重要）
 ----------------
 - 翻译失败时 **绝不** 静默回退到中文原文。
-  上层 plugin 必须能区分"成功拿到日文"和"翻译失败，
-  不应该继续送入 SBV2"，避免用中文喂出乱码再让用户听到。
+  上层 plugin 必须能区分"成功拿到日文"和"翻译失败"，
+  不应该继续送入 Style-Bert-VITS2，避免用中文喂出乱码再让用户听到。
 - 失败时通过 ``logger.error`` 暴露错误（log 中含"翻译"关键字，
-  T8 验收脚本依赖这一字符串做指标统计）。
+  便于排障与指标统计）。
 """
 
-from typing import Awaitable, Callable, Tuple
+from typing import Any, Awaitable, Callable, Dict, Tuple
 
 import asyncio
 import logging
 
 # 日志使用标准库 logger，遵循 AGENTS.md 的"插件层用 logging.getLogger"约定。
-# 上层 plugin 可以在加载本模块时配置/接管 handler，不必耦合 maibot_sdk。
 logger = logging.getLogger("plugin.sbv2_tts.translate")
 
 # ``llm_generate`` 回调签名：
-#   async def llm_generate(prompt: str, **kwargs) -> dict
+#   async def llm_generate(prompt: str, *, task_name: str, model_name: str, **kwargs) -> dict
 # 返回值遵循 MaiBot LLM 客户端约定（``{"success": bool, ...}``），
 # 实际注入的是 ``self.ctx.llm.generate``。
 LLMGenerate = Callable[..., Awaitable[dict]]
@@ -56,11 +64,13 @@ class JPTranslator:
         "原文：{text}"
     )
 
-    def __init__(self, max_length: int = 200) -> None:
+    def __init__(self, max_length: int = 100) -> None:
         """初始化翻译器。
 
         :param max_length: 译文最大字符数限制，会写入 prompt 让 LLM 自约束。
+            默认 100，对齐 Style-Bert-VITS2 服务端 ``limit``。
         """
+
         self.max_length = max_length
 
     async def translate(
@@ -68,34 +78,38 @@ class JPTranslator:
         text: str,
         log_prefix: str,
         llm_generate: LLMGenerate,
-        translate_model: str = "",
+        task_name: str = "replyer",
+        model_name: str = "",
     ) -> Tuple[bool, str]:
         """把中文原文翻译为日文。
 
         :param text: 中文原文，已剔除空白/分隔符，由调用方保证非空字符串。
-        :param log_prefix: 日志前缀（通常是 ``[插件名][事件id]``），
-            便于和 plugin 主流程的日志串起来。
+        :param log_prefix: 日志前缀（通常是 ``[插件名][事件id]``）。
         :param llm_generate: 异步 LLM 调用回调，签名见模块顶部 ``LLMGenerate``。
-        :param translate_model: LLM 任务名（task name），如 ``replyer`` / ``utils``；
-            空字符串时回退 ``replyer``——Host 对空任务名会取字母序首个任务
-            （embedding），用聊天请求打 embedding 模型会得到 404 Not Found。
-            具体模型名直连由调用方通过注入定制的 llm_generate 回调实现
-            （见 plugin.py 的 _make_pinned_llm_callback）。
+        :param task_name: LLM 任务名（``replyer``/``utils`` 等）。留空回退
+            ``replyer``，绝不能把空任务名发给 Host（旧版空任务名会取字母序首个
+            任务 embedding，打聊天请求会得到 404 Not Found）。
+        :param model_name: 具体模型名 / model_identifier；非空时由 Host 直连该模型，
+            无效时 Host 报错并经本方法暴露。
         :return: ``(success, payload)``：
             - 成功：``(True, 译文.strip())``
             - 失败：``(False, error_detail)``，**绝不返回原文**
         """
+
         if not text:
             # 空文本不是错误，但也不该走到 LLM；直接告诉调用方"没东西可翻译"。
             return False, ""
 
         prompt = self._PROMPT_TEMPLATE.format(max_length=self.max_length, text=text)
 
+        # 把任务名与模型名显式透传给 Host；两者语义不同：
+        # task_name 决定任务路由与默认参数，model_name 钉死具体模型。
+        request_kwargs: Dict[str, Any] = {"task_name": task_name or "replyer"}
+        if model_name:
+            request_kwargs["model_name"] = model_name
+
         try:
-            response = await llm_generate(
-                prompt,
-                model=translate_model or "replyer",
-            )
+            response = await llm_generate(prompt, **request_kwargs)
         except asyncio.TimeoutError as exc:
             # LLM 端超时，常见于 Host 卡死或任务模型未配置。
             logger.error("%s 日文翻译超时: %s", log_prefix, exc)
@@ -123,7 +137,7 @@ class JPTranslator:
             return False, error_detail or "未知错误"
 
         # 兼容多种成功字段命名：content / response / text。
-        # SBV2 翻译场景里 Host 通常用 ``response``，但 replyer 任务模型有时回 ``content``。
+        # Style-Bert-VITS2 翻译场景里 Host 通常用 ``response``，但部分任务模型回 ``content``。
         translated = str(
             response.get("response") or response.get("content") or response.get("text") or ""
         ).strip()
@@ -132,6 +146,6 @@ class JPTranslator:
             return True, translated
 
         # 极端情况：success=True 但正文为空，记下来并返回错误。
-        # 不能返回原文——上层应该走错误分支，而不是把中文丢给 SBV2 出乱码。
+        # 不能返回原文——上层应该走错误分支，而不是把中文丢给推理服务出乱码。
         logger.error("%s 日文翻译返回空内容", log_prefix)
         return False, "LLM 返回空内容"

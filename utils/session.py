@@ -106,6 +106,7 @@ class TTSSessionManager:
         json: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         data: Any = None,
+        params: Optional[Dict[str, Any]] = None,
         backend_name: str = "default",
         timeout: Optional[int] = None,
     ):
@@ -117,11 +118,16 @@ class TTSSessionManager:
             async with session_manager.post(url, json=payload) as response:
                 body = await response.read()
 
+            # Style-Bert-VITS2 /voice 走 query 参数
+            async with session_manager.post(url, params={"text": ...}) as response:
+                wav = await response.read()
+
         Args:
             url: 目标 URL。
             json: JSON 请求体（自动设置 Content-Type）。
             headers: 额外请求头。
             data: 表单 / 原始 body。
+            params: URL 查询参数（Style-Bert-VITS2 /voice 全部走 query）。
             backend_name: 后端名称，决定复用哪个 session。
             timeout: 本次请求独立的超时；None 时使用 session 默认值。
 
@@ -138,6 +144,7 @@ class TTSSessionManager:
             json=json,
             headers=headers,
             data=data,
+            params=params,
             timeout=req_timeout,
         )
         try:
