@@ -4,7 +4,6 @@
 manifest 不变量。插件目录名含连字符无法直接 import，故用 importlib 构造伪包加载。
 
 运行：
-    cd F:\\MaiBot
     uv run pytest plugins/ggsfly_sbv2-tts-CUDA-plugin/tests/test.py -q
 """
 
@@ -334,8 +333,8 @@ class TestManifest:
         """id 必须与留档插件区分，避免 loader 重复拉黑。"""
         assert manifest["id"] == "ggsfly.sbv2-tts-cuda-plugin"
 
-    def test_version_bumped(self, manifest: dict):
-        assert manifest["version"] == "2.0.0"
+    def test_version_initial(self, manifest: dict):
+        assert manifest["version"] == "1.0.0"
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
@@ -347,7 +346,7 @@ class TestManifest:
         assert "aiohttp" in deps
 
     def test_sdk_range(self, manifest: dict):
-        assert manifest["sdk"]["min_version"] == "2.0.0"
+        assert manifest["sdk"]["min_version"] == "2.8.1"
 
 
 # ============================================================

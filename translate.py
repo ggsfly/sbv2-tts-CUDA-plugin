@@ -86,9 +86,8 @@ class JPTranslator:
         :param text: 中文原文，已剔除空白/分隔符，由调用方保证非空字符串。
         :param log_prefix: 日志前缀（通常是 ``[插件名][事件id]``）。
         :param llm_generate: 异步 LLM 调用回调，签名见模块顶部 ``LLMGenerate``。
-        :param task_name: LLM 任务名（``replyer``/``utils`` 等）。留空回退
-            ``replyer``，绝不能把空任务名发给 Host（旧版空任务名会取字母序首个
-            任务 embedding，打聊天请求会得到 404 Not Found）。
+        :param task_name: LLM 任务名（``replyer``/``utils`` 等）。留空使用
+            ``replyer`` 任务。
         :param model_name: 具体模型名 / model_identifier；非空时由 Host 直连该模型，
             无效时 Host 报错并经本方法暴露。
         :return: ``(success, payload)``：

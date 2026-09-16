@@ -1,8 +1,8 @@
 # Style-Bert-VITS2 (CUDA) 日文语音合成插件
 
-MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推理服务合成日文语音。Style-Bert-VITS2 是日文推理模型，因此插件会先把输入文本翻译为日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
+MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推理服务合成日文语音。Style-Bert-VITS2 是日文推理模型，因此插件会先把输入文本翻译为自然日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
 
-> **v2.0.0** — 基于 MaiBot SDK 2.x 重构：原生模型/任务直连（无 `src.*` 导入）、适配新版 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。
+> **v1.0.0** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。
 
 ---
 
@@ -10,33 +10,43 @@ MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推�
 
 本插件不内置、也不自动管理 Style-Bert-VITS2 推理服务进程，需要你**自行部署并手动启动**本地推理服务：
 
-1. 启动 API 服务：
-   运行 `F:\sbv2 CUDA\dir\Style-Bert-VITS2-CUDA\..01 启动API服务.bat`
+### 1. 下载与解压模型包
+请前往 ModelScope 官方模型仓库下载 Style-Bert-VITS2 (CUDA) 整合包：
+👉 **[Style-Bert-VITS2-CUDA (ModelScope)](https://www.modelscope.cn/models/lingchat-research-studio/Style-Bert-VITS2-CUDA)**
+
+下载后解压至本地任意目录，目录结构示例如下：
+```
+Style-Bert-VITS2-CUDA/
+├── ..01 启动API服务.bat      # 启动 FastAPI 推理服务
+├── config.yml               # 服务端配置（默认 limit=100）
+├── server_fastapi.py        # API 服务入口
+└── model_assets/            # 已加载的语音模型
+    ├── Ling-v2/             # 对应音色 Ling v2
+    └── Fusetsu-v1.5/        # 对应音色 Fusetsu_v1.5
+```
+
+### 2. 启动推理服务
+1. 运行解压目录下的 `..01 启动API服务.bat`。
 2. 等待控制台输出 `server listen: http://127.0.0.1:5000`，确认服务已监听 `5000` 端口。
 3. 确认推理服务已就绪（可访问 `http://127.0.0.1:5000/docs` 查看交互式 API 文档）。
-4. 默认内置并加载以下模型档案：
-   - `Ling v2`（默认音色，对应模型 `Ling-v2`）
-   - `Fusetsu_v1.5`（对应模型 `Fusetsu-v1.5`）
-
-> 提示：中文 API 详细参数手册已生成至系统桌面：`StyleBertVITS2_API_中文使用文档.md`，可随时参阅。
 
 ---
 
 ## 安装与依赖
 
-1. 确保本插件位于 MaiBot 的 `plugins/ggsfly_sbv2-tts-CUDA-plugin` 目录。
-2. 依赖项为 `aiohttp`（`>=3.8.0`），MaiBot 运行时已默认内置，无需额外手动安装。
+1. 将本插件放置在 MaiBot 的 `plugins/ggsfly_sbv2-tts-CUDA-plugin` 目录下。
+2. 依赖项为 `aiohttp`（`>=3.8.0`），MaiBot 运行时环境默认携带，无需额外安装。
 
 ---
 
 ## 配置说明
 
-编辑 `plugins/ggsfly_sbv2-tts-CUDA-plugin/config.toml`：
+编辑插件目录下的 `config.toml`：
 
 ```toml
 [plugin]
 enabled = false
-config_version = "2.0.0"
+config_version = "1.0.0"
 
 [general]
 timeout = 60
@@ -87,7 +97,7 @@ style = "Neutral"
 | 段 | 字段 | 说明 |
 |---|---|---|
 | `[plugin]` | `enabled` | 是否启用插件 |
-| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"2.0.0"`） |
+| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.0.0"`） |
 | `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
 | `[general]` | `max_text_length` | 单段合成的最大字符数，对齐服务端 `limit=100` |
 | `[general]` | `strip_voice_placeholder` | 剥离 replyer 回复正文中的 `[语音消息]` 占位回声，默认 `true` |
@@ -117,7 +127,7 @@ style = "Neutral"
 /sbv2 help                          # 查看帮助与当前所有可用音色
 ```
 
-- 若传入未知音色，插件会明确返回错误信息并列出当前所有可用音色（避免静默回退造成混淆）。
+- 若传入未知音色，插件会明确返回错误信息并列出当前所有可用音色（不静默回退，防止音色偏离用户预期）。
 
 ### 自动触发（LLM Agent 规划）
 
@@ -137,7 +147,6 @@ style = "Neutral"
 本项目测试精简合并至单文件 `tests/test.py`，完整覆盖 utils、翻译层、后端参数组装与 manifest 不变量校验：
 
 ```bash
-cd F:\MaiBot
 uv run pytest plugins/ggsfly_sbv2-tts-CUDA-plugin/tests/test.py -q
 ```
 

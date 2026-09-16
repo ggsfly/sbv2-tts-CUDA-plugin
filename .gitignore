@@ -15,3 +15,6 @@ logs/
 
 # 虚拟环境
 .venv/
+
+# 本地开发配置
+pyrightconfig.json

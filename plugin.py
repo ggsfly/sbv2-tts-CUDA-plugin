@@ -19,9 +19,9 @@
 5. 调用 :class:`VoiceBackend` 逐段合成，并通过 ``ctx.send.custom("voice", base64)``
    把语音投递到聊天流
 
-LLM 调取（适配新版 SDK 2.x）
----------------------------
-不再 import ``src.*``、不再自建固定编排器。统一走 ``ctx.llm.generate``：
+LLM 调取规范
+------------
+遵循 MaiBot SDK 2.x 规范，不导入 ``src.*``，统一使用 ``ctx.llm.generate``：
 - 留空 → ``task_name="replyer"``
 - 命中可用任务名 → ``task_name=<值>``
 - 否则视为模型名/标识符 → ``task_name="replyer", model_name=<值>`` 直传 Host
@@ -78,7 +78,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.0.0", description="配置版本")
+    config_version: str = Field(default="1.0.0", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -462,9 +462,8 @@ class SBV2TTSPlugin(MaiBotPlugin):
         """把 ``translate_model`` 配置解析为 ``(task_name, model_name)``。
 
         规则：
-        - 留空 → ``("replyer", "")``。绝不能把空任务名发给 Host：
-          旧版空任务名会取字母序首个任务（embedding），打聊天请求会 404。
-        - 值是已注册任务名 → ``(值, "")``，按任务路由。
+        - 留空 → ``("replyer", "")``，默认使用 replyer 任务。
+        - 命中已注册任务名 → ``(值, "")``，按任务路由。
         - 否则视为模型名/标识符 → ``("replyer", 值)``，直传 Host 解析；
           模型无效时 Host 报错，翻译失败如实暴露，**不静默回退**。
 
