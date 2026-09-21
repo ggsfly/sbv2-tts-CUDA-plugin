@@ -2,7 +2,7 @@
 
 MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推理服务合成日文语音。Style-Bert-VITS2 是日文推理模型，因此插件会先把输入文本翻译为自然日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
 
-> **v1.0.0** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。
+> **v1.1.0** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。新增可选「语音前回显中文原文」（仅 @Tool，默认关闭），并把「智能分句」默认改为关闭。
 
 ---
 
@@ -46,7 +46,7 @@ Style-Bert-VITS2-CUDA/
 ```toml
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.1.0"
 
 [general]
 timeout = 60
@@ -54,9 +54,10 @@ timeout = 60
 # 插件会自动按该长度对长段做二次切分（clamp）。
 max_text_length = 100
 strip_voice_placeholder = true    # 剥离 replyer 正文中的 [语音消息] 占位回声
-split_sentences = true            # 长文本按标点分句逐段合成
+split_sentences = false           # 智能分句（默认关闭）；开启后按标点逐段合成
 split_delay = 0.3                 # 句子之间的发送间隔（秒）
 send_error_messages = true        # 合成失败时是否向聊天流回显错误提示
+echo_original_text = false        # 仅 @Tool：发语音前回显一条整段中文原文（默认关闭）
 translate_to_japanese = true      # 是否先把文本翻译为日文再合成
 # 翻译用 LLM。支持两种填法：
 #   1) 任务名：replyer / utils / planner / memory 等
@@ -86,13 +87,14 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 | 段 | 字段 | 说明 |
 |---|---|---|
 | `[plugin]` | `enabled` | 是否启用插件（默认 `true`） |
-| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.0.0"`） |
+| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.1.0"`） |
 | `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
 | `[general]` | `max_text_length` | 单段合成的最大字符数，对齐服务端 `limit=100` |
 | `[general]` | `strip_voice_placeholder` | 剥离 replyer 回复正文中的 `[语音消息]` 占位回声，默认 `true` |
-| `[general]` | `split_sentences` | 是否按标点切分句子逐段合成发送 |
+| `[general]` | `split_sentences` | 是否按标点切分句子逐段合成发送（**默认关闭**） |
 | `[general]` | `split_delay` | 分句发送间隔（秒） |
 | `[general]` | `send_error_messages` | 合成或翻译失败时是否回显错误文本 |
+| `[general]` | `echo_original_text` | **仅 @Tool**：发语音前回显一条整段中文原文（不分割、不回 planner；**默认关闭**，`translate_to_japanese=false` 时不生效） |
 | `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true` |
 | `[general]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务 |
 | `[components]` | `tool_enabled` | 是否启用 `sbv2_tts_tool` Tool |
@@ -127,7 +129,21 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 ## 智能分句与防超限截断
 
 1. **智能切分**：`|||SPLIT|||` 显式标记优先切分 > 标点符号自动切句 > 单句直接合成。
+   > 注：**标点自动切句由 `split_sentences` 控制，默认关闭**；关闭时（无 `|||SPLIT|||`）整段作为单句合成。
 2. **超限保护（Clamp）**：由于 Style-Bert-VITS2 服务端设置了 `limit=100` 字符上限，插件在分句后会对任何超过 `max_text_length` 的无标点长文本进行安全分块截断，彻底避免服务端返回 422 错误。
+
+---
+
+## （可选）语音前回显中文原文
+
+针对"部分成员听不懂日文语音"的场景，插件提供 `echo_original_text` 开关（**默认关闭**）：
+
+- **仅作用于 @Tool**（planner 自主调用 `sbv2_tts_tool` 发语音时）；`/sbv2`、`/voice` 手动命令**不会**回显，避免刷屏。
+- 在**翻译成功、确有语音要发**之后、投递第一条语音之前，用 `send.text` 发出**一条整段中文原文**。
+- **不分割**：回显内容是切分前的完整 `clean_text`（`|||SPLIT|||` 规整为换行），永远一条，不受 `split_sentences` 影响。
+- **不返回 planner**：发送时置 `sync_to_maisaka_history=False`，该条中文不写入 maisaka 历史，planner 看不到、不会据此二次生成，避免重复刷屏。
+- 依赖 `translate_to_japanese`：关闭翻译（中文语音）时该回显自动不生效。
+- 开启方式：WebUI 勾选 `[general].echo_original_text`，或在 `config.toml` 设为 `true`。
 
 ---
 
@@ -138,7 +154,7 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 | 能力标识 | 使用场景与说明 |
 |---|---|
 | `send.custom` | 核心语音投递能力：用于向聊天流投递 `voice` 类型 Base64 音频消息 |
-| `send.text` | 提示与错误反馈：用于向聊天流回显命令帮助文本、未知音色警告或合成失败详情 |
+| `send.text` | 文本投递：用于命令帮助、未知音色/合成失败提示，以及 `echo_original_text` 开启时在语音前回显中文原文（不回 planner） |
 | `llm.generate` | 中译日核心能力：在合成前将中文文本翻译为自然日文（支持直选模型与任务分发） |
 | `llm.get_available_models` | 任务名动态校验：用于识别 `translate_model` 所填项是模型任务名还是具体模型标识符 |
 | `component.disable` | 组件动态管理：在插件加载时根据配置的 `tool_enabled` / `command_enabled` 开关按需禁用对应组件 |

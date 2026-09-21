@@ -59,6 +59,8 @@ _load_module("backends.base", os.path.join(PLUGIN_DIR, "backends", "base.py"))
 voice_mod = _load_module("backends.voice", os.path.join(PLUGIN_DIR, "backends", "voice.py"))
 _load_module("backends", os.path.join(PLUGIN_DIR, "backends", "__init__.py"))
 translate_mod = _load_module("translate", os.path.join(PLUGIN_DIR, "translate.py"))
+# plugin.py 导入会触发 maibot_sdk 装饰器与后端注册；其相对导入依赖已加载的伪包。
+plugin_mod = _load_module("plugin", os.path.join(PLUGIN_DIR, "plugin.py"))
 
 # 暴露被测类型
 TTSTextUtils = sys.modules[f"{PACKAGE_NAME}.utils.text"].TTSTextUtils
@@ -67,6 +69,9 @@ VoiceBackend = voice_mod.VoiceBackend
 VoiceProfile = voice_mod.VoiceProfile
 JPTranslator = translate_mod.JPTranslator
 ConfigKeys = config_keys_mod.ConfigKeys
+GeneralConfig = plugin_mod.GeneralConfig
+PluginSectionConfig = plugin_mod.PluginSectionConfig
+SBV2TTSPlugin = plugin_mod.SBV2TTSPlugin
 
 
 def _run(coro):
@@ -331,7 +336,7 @@ class TestManifest:
         assert manifest["id"] == "ggsfly.sbv2-tts-cuda-plugin"
 
     def test_version_initial(self, manifest: dict):
-        assert manifest["version"] == "1.0.0"
+        assert manifest["version"] == "1.1.0"
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
@@ -344,6 +349,78 @@ class TestManifest:
 
     def test_sdk_range(self, manifest: dict):
         assert manifest["sdk"]["min_version"] == "2.8.1"
+
+
+# ============================================================
+# 配置默认值（v1.1.0：智能分句默认关闭 + 新增回显开关默认关闭）
+# ============================================================
+
+
+class TestConfigDefaults:
+    def test_split_sentences_default_off(self):
+        assert GeneralConfig().split_sentences is False
+
+    def test_echo_original_text_default_off(self):
+        assert GeneralConfig().echo_original_text is False
+
+    def test_config_version_bumped(self):
+        assert PluginSectionConfig().config_version == "1.1.0"
+
+
+# ============================================================
+# 语音前回显文本构造
+# ============================================================
+
+
+class TestBuildEchoText:
+    def test_strips_split_marker(self):
+        out = SBV2TTSPlugin._build_echo_text("今天|||SPLIT|||天气好")
+        assert "|||SPLIT|||" not in out
+        assert "今天" in out and "天气好" in out
+        assert out == "今天\n天气好"
+
+    def test_single_segment_preserved(self):
+        assert SBV2TTSPlugin._build_echo_text("你好世界") == "你好世界"
+
+    def test_empty_returns_empty(self):
+        assert SBV2TTSPlugin._build_echo_text("") == ""
+
+    def test_blank_lines_collapsed(self):
+        assert SBV2TTSPlugin._build_echo_text("a|||SPLIT||| |||SPLIT|||b") == "a\nb"
+
+
+# ============================================================
+# 回显作用域不变量：仅 @Tool、整段一条、不回 planner、受多重门控
+# ============================================================
+
+
+class TestEchoScope:
+    @pytest.fixture
+    def source(self) -> str:
+        path = os.path.join(PLUGIN_DIR, "plugin.py")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_run_pipeline_has_default_off_echo_param(self, source: str):
+        assert "echo_enabled: bool = False" in source
+
+    def test_only_tool_enables_echo(self, source: str):
+        # echo_enabled=True 只应出现在 @Tool 调用点（恰好 1 次）
+        assert source.count("echo_enabled=True") == 1
+
+    def test_command_does_not_enable_echo(self, source: str):
+        # Command 调用点用 raw_text=user_text，且其参数块不含 echo_enabled
+        idx = source.index("raw_text=user_text")
+        call_block = source[idx: idx + 200]
+        assert "echo_enabled" not in call_block
+
+    def test_echo_guarded_by_translate_and_sync_false(self, source: str):
+        norm = " ".join(source.split())
+        assert (
+            "echo_enabled and self.config.general.echo_original_text "
+            "and self.config.general.translate_to_japanese"
+        ) in norm
+        assert "sync_to_maisaka_history=False" in norm
 
 
 # ============================================================

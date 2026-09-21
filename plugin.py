@@ -9,13 +9,17 @@
 - ``@Command``：由用户通过 ``/sbv2`` / ``/voice`` 命令触发，对应
   ``sbv2_tts_command`` 组件。
 
-管线（Tool 与 Command 共用）：
+ 管线（Tool 与 Command 共用）：
 1. 文本清理（去除首尾空白）
-2. 智能分割：``|||SPLIT|||`` 标记优先切分 > ``TTSTextUtils.split_sentences`` > 单段
+2. 智能分割（``general.split_sentences`` 默认关闭）：``|||SPLIT|||`` 标记优先切分
+   > ``TTSTextUtils.split_sentences`` > 单段
 3. 若 ``general.translate_to_japanese`` 开启，调用 :class:`JPTranslator` 把每段
    中文译为日文（翻译失败时 **绝不** 用中文喂推理服务）
 4. 对每段译文再走 ``TTSTextUtils.split_sentences`` 自动切分，并用
    ``clamp_sentences`` 保证每段不超过服务端 ``limit``（默认 100）
+4.5 【仅 Tool】若 ``general.echo_original_text`` 开启，在投递语音前用
+   ``ctx.send.text`` 回显一条**整段不分割**的中文原文，且
+   ``sync_to_maisaka_history=False`` 不写 maisaka 历史（不返回 planner）
 5. 调用 :class:`VoiceBackend` 逐段合成，并通过 ``ctx.send.custom("voice", base64)``
    把语音投递到聊天流
 
@@ -84,7 +88,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.0.0", description="配置版本")
+    config_version: str = Field(default="1.1.0", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -110,9 +114,29 @@ class GeneralConfig(PluginConfigBase):
             "经智能分段后产生一条无意义的引用消息。开启后通过 maisaka.reply.before_post_process 钩子剥离。"
         ),
     )
-    split_sentences: bool = Field(default=True, description="是否按句子拆分合成")
+    split_sentences: bool = Field(
+        default=False,
+        description=(
+            "是否按句子拆分合成（默认关闭）。开启后中文按标点切段逐段翻译，"
+            "译文再按标点二次切段；超长段始终会按服务端 limit 兜底 clamp 以防 422。"
+        ),
+    )
     split_delay: float = Field(default=0.3, description="分句之间的发送间隔（秒）")
     send_error_messages: bool = Field(default=True, description="是否向聊天流回显错误提示")
+    echo_original_text: bool = Field(
+        default=False,
+        description=(
+            "（仅 @Tool 自动触发）发送日文语音前，先回显一条中文原文，"
+            "便于听不懂日文语音的成员阅读。整段不分割，且不写入 maisaka 历史（不返回 planner）。"
+            "默认关闭；translate_to_japanese=false 时不生效。"
+        ),
+        json_schema_extra={
+            "hint": (
+                "只在 planner 自主调用 sbv2_tts_tool 发语音时生效；@Command(/sbv2) 手动命令不回显。"
+                "回显为切分前的整段中文（|||SPLIT||| 规整为换行），且 sync_to_maisaka_history=False。"
+            ),
+        },
+    )
     translate_to_japanese: bool = Field(
         default=True,
         description="是否先把中文翻译为日文再合成（Style-Bert-VITS2 为日文推理模型）",
@@ -605,6 +629,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         stream_id: str,
         log_prefix: str,
         voice: Optional[VoiceProfile],
+        echo_enabled: bool = False,
     ) -> TTSResult:
         """翻译-合成管线的共享实现。
 
@@ -613,6 +638,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         2. ``|||SPLIT|||`` 优先切分，否则按 ``split_sentences`` 自动切分
         3. 对每段中文翻译为日文（若开启）；失败的段会被丢弃
         4. 对译文再按标点切分 + ``clamp_sentences`` 保证每段不超过服务端 limit
+        4.5 【仅 Tool 且配置开启】投递语音前回显整段中文原文
         5. 逐段合成投递
 
         Args:
@@ -620,6 +646,9 @@ class SBV2TTSPlugin(MaiBotPlugin):
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
             voice: 音色档案。
+            echo_enabled: 是否允许在语音前回显中文原文。仅 Tool 传 True；
+                实际是否回显还取决于 ``general.echo_original_text`` 与
+                ``general.translate_to_japanese``。
 
         Returns:
             :class:`TTSResult`。
@@ -715,6 +744,22 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 backend_name=_BACKEND_NAME,
             )
 
+        # 4.5 【仅 Tool】语音前回显整段中文原文（不分割；不回 planner）。
+        # 已确保此时翻译成功、确有语音要发（final_sentences 非空）。
+        if (
+            echo_enabled
+            and self.config.general.echo_original_text
+            and self.config.general.translate_to_japanese
+        ):
+            echo_text = self._build_echo_text(clean_text)
+            if echo_text:
+                await self.ctx.send.text(
+                    echo_text, stream_id, sync_to_maisaka_history=False,
+                )
+                self.ctx.logger.info(
+                    "%s 已在语音前回显中文原文（整段不分割，不回 planner）", log_prefix,
+                )
+
         # 5. 逐段合成投递
         return await self._send_in_segments(
             sentences=final_sentences,
@@ -786,6 +831,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 stream_id=stream_id,
                 log_prefix=log_prefix,
                 voice=profile,
+                echo_enabled=True,
             )
             return {"success": result.success, "message": result.message}
         except asyncio.TimeoutError:
@@ -957,6 +1003,22 @@ class SBV2TTSPlugin(MaiBotPlugin):
             style="Neutral",
         )
 
+    @staticmethod
+    def _build_echo_text(clean_text: str) -> str:
+        """把 ``|||SPLIT|||`` 标记规整为换行，产出用于回显的整段中文（不分割）。
+
+        Args:
+            clean_text: 已完成首尾清理的原始中文文本。
+
+        Returns:
+            str: 规整后的回显文本；输入为空时返回空串。
+        """
+
+        if not clean_text:
+            return ""
+        lines = [ln.strip() for ln in clean_text.replace(_SPLIT_MARKER, "\n").splitlines()]
+        return "\n".join(ln for ln in lines if ln)
+
     async def _send_help(self, stream_id: str) -> None:
         """发送 ``/sbv2 help`` 帮助文本。"""
 
@@ -974,9 +1036,12 @@ class SBV2TTSPlugin(MaiBotPlugin):
             "🌐 翻译机制：\n"
             "插件默认先把中文翻译为日文，再送入本地 Style-Bert-VITS2 推理合成。"
             "若 translate_to_japanese = false，则跳过翻译。\n\n"
-            "✂️ 智能分割：\n"
-            "文本中包含 |||SPLIT||| 时按标记精确分段；否则按句末标点自动切分，"
-            "并对超长段落按服务端 limit（默认 100 字符）二次切分。\n\n"
+            "✂️ 分段（智能分割默认关闭）：\n"
+            "含 |||SPLIT||| 时按标记分段；否则整段合成（超长仍按服务端 limit=100 兜底切分防 422）。"
+            "如需按标点自动分句，请开启 general.split_sentences。\n\n"
+            "🈶 语音前回显中文（可选，默认关闭）：\n"
+            "开启 general.echo_original_text 后，仅 planner 自动发语音(@Tool) 时会在语音前"
+            "先发一条整段中文原文方便阅读；/sbv2 手动命令不回显。\n\n"
             "📌 示例：\n"
             "/sbv2 你好世界\n"
             "/sbv2 今天的天气真不错 -v Fusetsu_v1.5\n"
