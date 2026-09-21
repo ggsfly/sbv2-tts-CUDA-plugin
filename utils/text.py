@@ -3,11 +3,9 @@
 提供 TTS 场景下的文本预处理能力：
 - clean_text：去除首尾空白（保留原文以便上层决策）
 - detect_language：按字符比例判定语言（zh / ja / en）
-- split_sentences：按中英文句末标点切句，过短的句子并入前一句
-- clamp_sentences：对超过服务端长度上限的段落做二次切分
-"""
 
-from typing import List
+注：插件已移除“按标点分句 + 超长硬切”能力，改为整段一次性合成单条语音。
+"""
 
 import re
 
@@ -79,91 +77,3 @@ class TTSTextUtils:
         if english_ratio > 0.8:
             return "en"
         return "zh"
-
-    @classmethod
-    def split_sentences(cls, text: str, min_length: int = 2) -> List[str]:
-        """
-        按句末标点将文本切分为句子列表。
-
-        支持的中英文标点：。 ！ ？ ; ； ！ ?
-        切分后过短（长度 < min_length）的句子会并入前一句，避免把"啊""呢"
-        之类的语气词单独发送给 TTS 引擎。
-
-        Args:
-            text: 待切分文本。
-            min_length: 最小句子长度；设为 0 或负数则禁用合并。
-
-        Returns:
-            句子列表；输入为空时返回空列表。
-        """
-        if not text:
-            return []
-
-        # 用捕获组分割，保留分隔符以便拼接
-        pattern = r"([。！？!?；;])"
-        parts = re.split(pattern, text)
-
-        sentences: List[str] = []
-        current = ""
-
-        for part in parts:
-            if not part:
-                continue
-
-            # 当前 part 是标点时，附加到正在累积的句子末尾
-            if re.match(pattern, part):
-                current += part
-                continue
-
-            # 普通文本段：先把已有的 current 入栈，再用新段开启下一句
-            if current.strip():
-                sentences.append(current.strip())
-            current = part
-
-        # 收尾：把最后一段非空内容加入结果
-        if current.strip():
-            sentences.append(current.strip())
-
-        # 合并过短句子到前一句
-        if min_length > 0 and len(sentences) > 1:
-            merged: List[str] = []
-            for sent in sentences:
-                if merged and len(sent) < min_length:
-                    merged[-1] += sent
-                else:
-                    merged.append(sent)
-            sentences = merged
-
-        return sentences
-
-    @classmethod
-    def clamp_sentences(cls, sentences: List[str], max_length: int) -> List[str]:
-        """
-        对超过服务端长度上限的段落做二次切分。
-
-        Style-Bert-VITS2 服务端对单次 ``text`` 有字符数上限（``limit``，默认 100），
-        超过会返回 422。本方法在 ``split_sentences`` 之后兜底：对任何长度超过
-        ``max_length`` 的句子，按 ``max_length`` 等长切分为多段，保证每段都不超限。
-
-        Args:
-            sentences: 经过句末标点切分后的句子列表。
-            max_length: 单段最大字符数；<= 0 时直接返回原列表。
-
-        Returns:
-            切分后的句子列表，每段长度 <= max_length。
-        """
-        if max_length <= 0:
-            return list(sentences)
-
-        result: List[str] = []
-        for sentence in sentences:
-            if len(sentence) <= max_length:
-                result.append(sentence)
-                continue
-            # 等长硬切：不尝试在词/标点处断句，因为上游 split_sentences 已按标点切过，
-            # 这里只剩"无标点的长段"，硬切是唯一可行做法。
-            for i in range(0, len(sentence), max_length):
-                chunk = sentence[i:i + max_length]
-                if chunk:
-                    result.append(chunk)
-        return result

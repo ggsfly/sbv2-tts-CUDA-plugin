@@ -2,7 +2,7 @@
 
 MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推理服务合成日文语音。Style-Bert-VITS2 是日文推理模型，因此插件会先把输入文本翻译为自然日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
 
-> **v1.1.0** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。新增可选「语音前回显中文原文」（仅 @Tool，默认关闭），并把「智能分句」默认改为关闭。
+> **v1.1.1** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。每条输入**一次性整段合成单条语音**（已移除智能分句 / `|||SPLIT|||` 分段 / 超长自动截断等分段子系统）；保留可选「语音前回显中文原文」（仅 @Tool，默认关闭）。
 
 ---
 
@@ -46,16 +46,14 @@ Style-Bert-VITS2-CUDA/
 ```toml
 [plugin]
 enabled = true
-config_version = "1.1.0"
+config_version = "1.1.1"
 
 [general]
 timeout = 60
-# 单段合成文本的最大字符数。Style-Bert-VITS2 服务端 limit 默认 100，超过会返回 422。
-# 插件会自动按该长度对长段做二次切分（clamp）。
+# 译文长度上限（字符数），注入翻译 prompt 约束 LLM 生成的日文长度，对齐服务端 limit（默认 100）。
+# 超长不再自动截断，由后端如实返回 422 错误。
 max_text_length = 100
 strip_voice_placeholder = true    # 剥离 replyer 正文中的 [语音消息] 占位回声
-split_sentences = false           # 智能分句（默认关闭）；开启后按标点逐段合成
-split_delay = 0.3                 # 句子之间的发送间隔（秒）
 send_error_messages = true        # 合成失败时是否向聊天流回显错误提示
 echo_original_text = false        # 仅 @Tool：发语音前回显一条整段中文原文（默认关闭）
 translate_to_japanese = true      # 是否先把文本翻译为日文再合成
@@ -87,12 +85,10 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 | 段 | 字段 | 说明 |
 |---|---|---|
 | `[plugin]` | `enabled` | 是否启用插件（默认 `true`） |
-| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.1.0"`） |
+| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.1.1"`） |
 | `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
-| `[general]` | `max_text_length` | 单段合成的最大字符数，对齐服务端 `limit=100` |
+| `[general]` | `max_text_length` | 译文长度上限（注入翻译 prompt，对齐服务端 `limit=100`；超长不再自动截断） |
 | `[general]` | `strip_voice_placeholder` | 剥离 replyer 回复正文中的 `[语音消息]` 占位回声，默认 `true` |
-| `[general]` | `split_sentences` | 是否按标点切分句子逐段合成发送（**默认关闭**） |
-| `[general]` | `split_delay` | 分句发送间隔（秒） |
 | `[general]` | `send_error_messages` | 合成或翻译失败时是否回显错误文本 |
 | `[general]` | `echo_original_text` | **仅 @Tool**：发语音前回显一条整段中文原文（不分割、不回 planner；**默认关闭**，`translate_to_japanese=false` 时不生效） |
 | `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true` |
@@ -126,11 +122,13 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 
 ---
 
-## 智能分句与防超限截断
+## 合成方式：一次性整段合成
 
-1. **智能切分**：`|||SPLIT|||` 显式标记优先切分 > 标点符号自动切句 > 单句直接合成。
-   > 注：**标点自动切句由 `split_sentences` 控制，默认关闭**；关闭时（无 `|||SPLIT|||`）整段作为单句合成。
-2. **超限保护（Clamp）**：由于 Style-Bert-VITS2 服务端设置了 `limit=100` 字符上限，插件在分句后会对任何超过 `max_text_length` 的无标点长文本进行安全分块截断，彻底避免服务端返回 422 错误。
+自 v1.1.1 起，插件**不再做任何分句 / 分段 / 超长自动截断**：每条输入整段翻译为日文后，
+一次性合成为**单条语音**投递。
+
+- 译文长度由 `general.max_text_length`（注入翻译 prompt）约束，引导模型输出不超过约 100 字符。
+- 若译文仍超过服务端 `limit`，**不再自动截断**，而是由后端如实返回 422 错误并回显（符合“错误如实暴露、不静默兜底”原则）。请缩短输入或调整服务端 `limit`。
 
 ---
 
@@ -140,7 +138,7 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 
 - **仅作用于 @Tool**（planner 自主调用 `sbv2_tts_tool` 发语音时）；`/sbv2`、`/voice` 手动命令**不会**回显，避免刷屏。
 - 在**翻译成功、确有语音要发**之后、投递第一条语音之前，用 `send.text` 发出**一条整段中文原文**。
-- **不分割**：回显内容是切分前的完整 `clean_text`（`|||SPLIT|||` 规整为换行），永远一条，不受 `split_sentences` 影响。
+- **整段一条**：回显内容为清理后的完整中文原文，永远一条（插件本身已不再做任何分句 / 分段）。
 - **不返回 planner**：发送时置 `sync_to_maisaka_history=False`，该条中文不写入 maisaka 历史，planner 看不到、不会据此二次生成，避免重复刷屏。
 - 依赖 `translate_to_japanese`：关闭翻译（中文语音）时该回显自动不生效。
 - 开启方式：WebUI 勾选 `[general].echo_original_text`，或在 `config.toml` 设为 `true`。
@@ -179,7 +177,7 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 
 ### 4. 服务端返回 422 错误（参数错误）
 - **音色不存在**：若使用 `/sbv2 -v <音色>` 指定了未知音色，请先使用 `/sbv2 help` 查看当前配置支持的音色名称。
-- **单段文本过长**：Style-Bert-VITS2 默认对单次输入字符有硬性上限（默认 100 字符），插件已开启自动截断保护；若自行修改了服务端的 `limit`，请同步调整插件的 `max_text_length`。
+- **译文过长**：Style-Bert-VITS2 对单次输入有字符上限（默认 100）。v1.1.1 起不再自动截断，超长会如实返回 422；请缩短输入文本，或同步调整服务端 `limit` 与插件的 `max_text_length`（后者用于约束译文生成长度）。
 
 ---
 
@@ -212,7 +210,7 @@ ggsfly_sbv2-tts-CUDA-plugin/
 │   ├── __init__.py
 │   ├── file.py              # base64 编解码与数据校验
 │   ├── session.py           # aiohttp ClientSession 复用池
-│   └── text.py              # 文本清理、语种检测、分句与 clamp 截断
+│   └── text.py              # 文本清理、语种检测
 └── tests/                   # 自动化测试
     └── test.py              # 全量自包含单元测试
 ```

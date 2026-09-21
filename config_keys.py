@@ -21,8 +21,6 @@ class ConfigKeys:
     # ========== General 通用配置 ==========
     GENERAL_TIMEOUT: Final[str] = "general.timeout"
     GENERAL_MAX_TEXT_LENGTH: Final[str] = "general.max_text_length"
-    GENERAL_SPLIT_SENTENCES: Final[str] = "general.split_sentences"
-    GENERAL_SPLIT_DELAY: Final[str] = "general.split_delay"
     GENERAL_SEND_ERROR_MESSAGES: Final[str] = "general.send_error_messages"
     GENERAL_ECHO_ORIGINAL_TEXT: Final[str] = "general.echo_original_text"
     GENERAL_TRANSLATE_TO_JAPANESE: Final[str] = "general.translate_to_japanese"

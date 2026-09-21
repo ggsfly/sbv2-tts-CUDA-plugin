@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "Style-Bert-VITS2 日文语音合成插件 (CUDA)",
   "description": "调用本地 Style-Bert-VITS2 (CUDA) 推理服务合成日文语音的 TTS 插件",
   "plugin_type": "media",

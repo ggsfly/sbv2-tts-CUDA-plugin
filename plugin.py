@@ -9,19 +9,15 @@
 - ``@Command``：由用户通过 ``/sbv2`` / ``/voice`` 命令触发，对应
   ``sbv2_tts_command`` 组件。
 
- 管线（Tool 与 Command 共用）：
+ 管线（Tool 与 Command 共用，一次性整段合成单条语音）：
 1. 文本清理（去除首尾空白）
-2. 智能分割（``general.split_sentences`` 默认关闭）：``|||SPLIT|||`` 标记优先切分
-   > ``TTSTextUtils.split_sentences`` > 单段
-3. 若 ``general.translate_to_japanese`` 开启，调用 :class:`JPTranslator` 把每段
-   中文译为日文（翻译失败时 **绝不** 用中文喂推理服务）
-4. 对每段译文再走 ``TTSTextUtils.split_sentences`` 自动切分，并用
-   ``clamp_sentences`` 保证每段不超过服务端 ``limit``（默认 100）
-4.5 【仅 Tool】若 ``general.echo_original_text`` 开启，在投递语音前用
-   ``ctx.send.text`` 回显一条**整段不分割**的中文原文，且
-   ``sync_to_maisaka_history=False`` 不写 maisaka 历史（不返回 planner）
-5. 调用 :class:`VoiceBackend` 逐段合成，并通过 ``ctx.send.custom("voice", base64)``
-   把语音投递到聊天流
+2. 若 ``general.translate_to_japanese`` 开启，调用 :class:`JPTranslator` 把整段
+   中文译为日文（翻译失败时 **绝不** 用中文喂推理服务，直接如实暴露错误）
+3. 【仅 Tool】若 ``general.echo_original_text`` 开启，在投递语音前用
+   ``ctx.send.text`` 回显一条整段中文原文，且 ``sync_to_maisaka_history=False``
+   不写 maisaka 历史（不返回 planner）
+4. 调用 :class:`VoiceBackend` 合成唯一一条语音，并通过
+   ``ctx.send.custom("voice", base64)`` 投递到聊天流
 
 LLM 调取规范
 ------------
@@ -54,14 +50,11 @@ sys.dont_write_bytecode = True
 logger = logging.getLogger("plugin.sbv2_tts")
 
 # replyer 会把聊天历史里语音消息的占位渲染（[语音消息]）模仿进回复正文开头，
-# 导致首条分段变成无意义的"[语音消息]"引用消息。这里用正则剥离该占位回声：
+# 导致首条回复消息变成无意义的"[语音消息]"引用。这里用正则剥离该占位回声：
 # - 响应开头的连续占位（可带冒号/空格）：[语音消息]你音量... → 你音量...
 # - 独立成行的占位行（连同行尾换行一起删除，避免残留空行）
 _VOICE_PLACEHOLDER_LEADING_PATTERN = re.compile(r"^(?:\s*\[语音消息\]\s*)+")
 _VOICE_PLACEHOLDER_LINE_PATTERN = re.compile(r"^[ \t]*\[语音消息\][ \t]*(?:\n|$)", re.MULTILINE)
-
-# 智能分割标记，与 xuqian13_tts-voice-plugin 保持一致
-_SPLIT_MARKER = "|||SPLIT|||"
 
 # 后端注册表注册名（与 ``VoiceBackend.backend_name`` 保持一致）
 _BACKEND_NAME = "voice"
@@ -88,7 +81,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.1.0", description="配置版本")
+    config_version: str = Field(default="1.1.1", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -102,8 +95,9 @@ class GeneralConfig(PluginConfigBase):
     max_text_length: int = Field(
         default=100,
         description=(
-            "单段合成文本的最大字符数，对齐 Style-Bert-VITS2 服务端 limit（默认 100）。"
-            "超长段落会被自动二次切分，避免触发服务端 422。"
+            "译文长度上限（字符数），注入翻译 prompt 约束 LLM 生成的日文长度，"
+            "对齐 Style-Bert-VITS2 服务端 limit（默认 100）。超长不再自动截断，"
+            "由后端如实返回 422 错误。"
         ),
     )
     strip_voice_placeholder: bool = Field(
@@ -111,29 +105,21 @@ class GeneralConfig(PluginConfigBase):
         description=(
             "是否剥离 replyer 正文中的 [语音消息] 占位回声。"
             "本插件发送语音后，聊天历史会把语音渲染为 [语音消息]，replyer 偶尔会模仿该占位并写进回复正文，"
-            "经智能分段后产生一条无意义的引用消息。开启后通过 maisaka.reply.before_post_process 钩子剥离。"
+            "形成一条无意义的引用消息。开启后通过 maisaka.reply.before_post_process 钩子剥离。"
         ),
     )
-    split_sentences: bool = Field(
-        default=False,
-        description=(
-            "是否按句子拆分合成（默认关闭）。开启后中文按标点切段逐段翻译，"
-            "译文再按标点二次切段；超长段始终会按服务端 limit 兜底 clamp 以防 422。"
-        ),
-    )
-    split_delay: float = Field(default=0.3, description="分句之间的发送间隔（秒）")
     send_error_messages: bool = Field(default=True, description="是否向聊天流回显错误提示")
     echo_original_text: bool = Field(
         default=False,
         description=(
             "（仅 @Tool 自动触发）发送日文语音前，先回显一条中文原文，"
-            "便于听不懂日文语音的成员阅读。整段不分割，且不写入 maisaka 历史（不返回 planner）。"
+            "便于听不懂日文语音的成员阅读。整段一条、不写入 maisaka 历史（不返回 planner）。"
             "默认关闭；translate_to_japanese=false 时不生效。"
         ),
         json_schema_extra={
             "hint": (
                 "只在 planner 自主调用 sbv2_tts_tool 发语音时生效；@Command(/sbv2) 手动命令不回显。"
-                "回显为切分前的整段中文（|||SPLIT||| 规整为换行），且 sync_to_maisaka_history=False。"
+                "回显为整段中文原文一条，且 sync_to_maisaka_history=False。"
             ),
         },
     )
@@ -207,7 +193,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
     """Style-Bert-VITS2 (CUDA) 日文语音合成插件（MaiBot SDK 2.x 版）。
 
     由 Tool / Command 共同驱动 Style-Bert-VITS2 服务的 ``/voice`` 接口，
-    并通过 :meth:`_send_in_segments` 把多段语音依次投递到当前聊天流。
+    每条输入一次性整段合成、投递唯一一条语音到当前聊天流。
     """
 
     config_model = SBV2TTSPluginConfig
@@ -280,7 +266,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         """剥离 replyer 正文中的 [语音消息] 占位回声。
 
         本插件发送语音后，聊天历史会把该语音渲染为占位文本，replyer 在
-        同一轮生成文字回复时可能把占位模仿进正文开头，经智能分段后会
+        同一轮生成文字回复时可能把占位模仿进正文开头，从而
         产生一条只含"[语音消息]"的引用消息。此钩子在文本后处理前把它剥掉。
 
         Args:
@@ -528,100 +514,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         )
         return "replyer", raw
 
-    # ─── 内部：分段发送 ──────────────────────────────────────────────────
-
-    async def _send_in_segments(
-        self,
-        sentences: List[str],
-        stream_id: str,
-        log_prefix: str,
-        voice: Optional[VoiceProfile],
-        split_delay: float,
-    ) -> TTSResult:
-        """逐段合成并投递。
-
-        单句：直接调一次后端，失败时按 ``send_error_messages`` 配置发错误提示。
-        多句：任一段失败→记录、停止后续段、汇总 ``success_count`` / ``total``。
-
-        Args:
-            sentences: 待合成段落列表。
-            stream_id: 当前聊天流 ID。
-            log_prefix: 日志前缀。
-            voice: 音色档案。
-            split_delay: 段落间隔秒数。
-
-        Returns:
-            :class:`TTSResult`。
-        """
-
-        send_errors: bool = self.config.general.send_error_messages
-
-        # 单段：直接调一次后端
-        if len(sentences) <= 1:
-            single_text = sentences[0] if sentences else ""
-            if not single_text:
-                return TTSResult(
-                    success=False,
-                    message="无可合成的文本",
-                    backend_name=_BACKEND_NAME,
-                )
-            result = await self._execute_backend(
-                single_text, stream_id, log_prefix, voice=voice,
-            )
-            if not result.success and send_errors:
-                await self.ctx.send.text(
-                    f"语音合成失败: {result.message}", stream_id,
-                )
-            return result
-
-        # 多段：逐段合成，任一段失败→记录并停止
-        total = len(sentences)
-        success_count = 0
-        last_error: str = ""
-        for index, sentence in enumerate(sentences):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            result = await self._execute_backend(
-                sentence, stream_id, log_prefix, voice=voice,
-            )
-            if result.success:
-                success_count += 1
-                self.ctx.logger.debug(
-                    "%s 分段 %d/%d 合成成功", log_prefix, index + 1, total,
-                )
-            else:
-                logger.error(
-                    "%s 分段 %d/%d 合成失败: %s",
-                    log_prefix, index + 1, total, result.message,
-                )
-                last_error = result.message
-                break
-            if index < total - 1 and split_delay > 0:
-                await asyncio.sleep(split_delay)
-
-        logger.info(
-            "%s 成功发送 %d/%d 条语音",
-            log_prefix, success_count, total,
-        )
-
-        if success_count == 0:
-            if send_errors:
-                await self.ctx.send.text(
-                    f"语音合成失败: {last_error or '未知错误'}", stream_id,
-                )
-            return TTSResult(
-                success=False,
-                message="所有语音发送失败",
-                backend_name=_BACKEND_NAME,
-            )
-        return TTSResult(
-            success=True,
-            message=f"成功发送 {success_count}/{total} 条语音",
-            backend_name=_BACKEND_NAME,
-        )
-
-    # ─── 内部：分割 + 翻译 + 合成 共享管线 ───────────────────────────────
+    # ─── 内部：翻译 + 合成 共享管线（一次性整段合成单条语音）──────────────
 
     async def _run_pipeline(
         self,
@@ -631,15 +524,13 @@ class SBV2TTSPlugin(MaiBotPlugin):
         voice: Optional[VoiceProfile],
         echo_enabled: bool = False,
     ) -> TTSResult:
-        """翻译-合成管线的共享实现。
+        """翻译-合成管线的共享实现（一次性整段合成单条语音）。
 
         步骤：
         1. 文本清理
-        2. ``|||SPLIT|||`` 优先切分，否则按 ``split_sentences`` 自动切分
-        3. 对每段中文翻译为日文（若开启）；失败的段会被丢弃
-        4. 对译文再按标点切分 + ``clamp_sentences`` 保证每段不超过服务端 limit
-        4.5 【仅 Tool 且配置开启】投递语音前回显整段中文原文
-        5. 逐段合成投递
+        2. 整段翻译为日文（若开启）；失败即如实暴露并返回，不分段、不回退原文
+        3. 【仅 Tool 且配置开启】语音前回显整段中文原文（不回 planner）
+        4. 合成并投递唯一一条语音
 
         Args:
             raw_text: 原始输入文本。
@@ -655,7 +546,6 @@ class SBV2TTSPlugin(MaiBotPlugin):
         """
 
         send_errors: bool = self.config.general.send_error_messages
-        max_length: int = self.config.general.max_text_length
 
         # 1. 文本清理
         clean_text = TTSTextUtils.clean_text(raw_text)
@@ -670,82 +560,20 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 backend_name=_BACKEND_NAME,
             )
 
-        # 2. 智能分割：|||SPLIT||| 标记优先切分
-        if _SPLIT_MARKER in clean_text:
-            segments = [
-                s.strip()
-                for s in clean_text.split(_SPLIT_MARKER)
-                if s.strip()
-            ]
-        elif self.config.general.split_sentences:
-            segments = TTSTextUtils.split_sentences(clean_text)
-        else:
-            segments = [clean_text]
-
-        if not segments:
-            segments = [clean_text]
-
-        # 3. 单段 vs 多段翻译策略
-        translated_segments: List[str] = []
-        first_failure_message: str = ""
-        if len(segments) == 1:
-            ok, payload = await self._translate_text(segments[0], log_prefix)
-            if not ok:
-                if send_errors:
-                    await self.ctx.send.text(
-                        f"语音合成失败: 日文翻译失败: {payload}",
-                        stream_id,
-                    )
-                return TTSResult(
-                    success=False,
-                    message=f"日文翻译失败: {payload}",
-                    backend_name=_BACKEND_NAME,
+        # 2. 整段翻译（失败即暴露，绝不回退原文、不分段）
+        ok, payload = await self._translate_text(clean_text, log_prefix)
+        if not ok:
+            if send_errors:
+                await self.ctx.send.text(
+                    f"语音合成失败: 日文翻译失败: {payload}", stream_id,
                 )
-            translated_segments = [payload]
-        else:
-            for seg in segments:
-                ok, payload = await self._translate_text(seg, log_prefix)
-                if ok:
-                    translated_segments.append(payload)
-                else:
-                    if not first_failure_message:
-                        first_failure_message = payload
-                    # 翻译失败的段丢弃，不送入推理服务
-            if not translated_segments:
-                if send_errors:
-                    await self.ctx.send.text(
-                        f"语音合成失败: 日文翻译失败: {first_failure_message or '未知错误'}",
-                        stream_id,
-                    )
-                return TTSResult(
-                    success=False,
-                    message=f"日文翻译失败: {first_failure_message or '未知错误'}",
-                    backend_name=_BACKEND_NAME,
-                )
-
-        # 4. 对每段译文再切分（避免单段过长），并 clamp 到服务端 limit
-        final_sentences: List[str] = []
-        for translated in translated_segments:
-            if self.config.general.split_sentences:
-                sub = TTSTextUtils.split_sentences(translated)
-            else:
-                sub = [translated]
-            # 兜底：保证每段不超过 max_length（服务端 limit），否则会 422
-            sub = TTSTextUtils.clamp_sentences(sub, max_length)
-            for s in sub:
-                s = s.strip()
-                if s:
-                    final_sentences.append(s)
-
-        if not final_sentences:
             return TTSResult(
                 success=False,
-                message="无可合成的文本",
+                message=f"日文翻译失败: {payload}",
                 backend_name=_BACKEND_NAME,
             )
 
-        # 4.5 【仅 Tool】语音前回显整段中文原文（不分割；不回 planner）。
-        # 已确保此时翻译成功、确有语音要发（final_sentences 非空）。
+        # 3. 【仅 Tool】语音前回显整段中文原文（不回 planner）
         if (
             echo_enabled
             and self.config.general.echo_original_text
@@ -757,17 +585,18 @@ class SBV2TTSPlugin(MaiBotPlugin):
                     echo_text, stream_id, sync_to_maisaka_history=False,
                 )
                 self.ctx.logger.info(
-                    "%s 已在语音前回显中文原文（整段不分割，不回 planner）", log_prefix,
+                    "%s 已在语音前回显中文原文（不回 planner）", log_prefix,
                 )
 
-        # 5. 逐段合成投递
-        return await self._send_in_segments(
-            sentences=final_sentences,
-            stream_id=stream_id,
-            log_prefix=log_prefix,
-            voice=voice,
-            split_delay=self.config.general.split_delay,
+        # 4. 一次性合成并投递唯一一条语音
+        result = await self._execute_backend(
+            payload, stream_id, log_prefix, voice=voice,
         )
+        if not result.success and send_errors:
+            await self.ctx.send.text(
+                f"语音合成失败: {result.message}", stream_id,
+            )
+        return result
 
     # ─── Tool: 由 LLM 自主触发 ───────────────────────────────────────────
 
@@ -1005,19 +834,16 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
     @staticmethod
     def _build_echo_text(clean_text: str) -> str:
-        """把 ``|||SPLIT|||`` 标记规整为换行，产出用于回显的整段中文（不分割）。
+        """产出用于语音前回显的整段中文原文（直接去首尾空白）。
 
         Args:
             clean_text: 已完成首尾清理的原始中文文本。
 
         Returns:
-            str: 规整后的回显文本；输入为空时返回空串。
+            str: 回显文本；输入为空时返回空串。
         """
 
-        if not clean_text:
-            return ""
-        lines = [ln.strip() for ln in clean_text.replace(_SPLIT_MARKER, "\n").splitlines()]
-        return "\n".join(ln for ln in lines if ln)
+        return (clean_text or "").strip()
 
     async def _send_help(self, stream_id: str) -> None:
         """发送 ``/sbv2 help`` 帮助文本。"""
@@ -1036,16 +862,15 @@ class SBV2TTSPlugin(MaiBotPlugin):
             "🌐 翻译机制：\n"
             "插件默认先把中文翻译为日文，再送入本地 Style-Bert-VITS2 推理合成。"
             "若 translate_to_japanese = false，则跳过翻译。\n\n"
-            "✂️ 分段（智能分割默认关闭）：\n"
-            "含 |||SPLIT||| 时按标记分段；否则整段合成（超长仍按服务端 limit=100 兜底切分防 422）。"
-            "如需按标点自动分句，请开启 general.split_sentences。\n\n"
+            "✂️ 合成方式：\n"
+            "每条输入一次性整段翻译并合成为单条语音（不再按标点/标记分句）。"
+            "译文长度由 general.max_text_length 约束，若仍超长将由服务端返回 422 错误。\n\n"
             "🈶 语音前回显中文（可选，默认关闭）：\n"
             "开启 general.echo_original_text 后，仅 planner 自动发语音(@Tool) 时会在语音前"
             "先发一条整段中文原文方便阅读；/sbv2 手动命令不回显。\n\n"
             "📌 示例：\n"
             "/sbv2 你好世界\n"
             "/sbv2 今天的天气真不错 -v Fusetsu_v1.5\n"
-            "/voice 今天天气不错|||SPLIT|||适合出去玩\n"
         )
         await self.ctx.send.text(help_text, stream_id)
 

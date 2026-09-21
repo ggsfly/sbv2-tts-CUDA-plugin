@@ -93,37 +93,11 @@ class TestTextUtils:
         assert TTSTextUtils.clean_text("") == ""
         assert TTSTextUtils.clean_text(None) == ""  # type: ignore[arg-type]
 
-    def test_split_sentences_basic(self):
-        result = TTSTextUtils.split_sentences("你好。世界！")
-        assert len(result) >= 2
-        assert any("。" in seg or "！" in seg for seg in result)
-
-    def test_split_sentences_empty(self):
-        assert TTSTextUtils.split_sentences("") == []
-        assert TTSTextUtils.split_sentences(None) == []  # type: ignore[arg-type]
-
     def test_detect_language(self):
         assert TTSTextUtils.detect_language("こんにちは") == "ja"
         assert TTSTextUtils.detect_language("你好世界") == "zh"
         assert TTSTextUtils.detect_language("hello world") == "en"
         assert TTSTextUtils.detect_language("") == "zh"
-
-    def test_clamp_sentences_short_unchanged(self):
-        """短段不切分。"""
-        result = TTSTextUtils.clamp_sentences(["短句", "另一句"], 100)
-        assert result == ["短句", "另一句"]
-
-    def test_clamp_sentences_long_split(self):
-        """超长段按 max_length 等长切分，每段不超限。"""
-        long_text = "あ" * 250
-        result = TTSTextUtils.clamp_sentences([long_text], 100)
-        assert len(result) == 3
-        assert all(len(seg) <= 100 for seg in result)
-        assert "".join(result) == long_text
-
-    def test_clamp_sentences_zero_max_returns_original(self):
-        result = TTSTextUtils.clamp_sentences(["a", "b"], 0)
-        assert result == ["a", "b"]
 
 
 class TestFileManager:
@@ -336,7 +310,7 @@ class TestManifest:
         assert manifest["id"] == "ggsfly.sbv2-tts-cuda-plugin"
 
     def test_version_initial(self, manifest: dict):
-        assert manifest["version"] == "1.1.0"
+        assert manifest["version"] == "1.1.1"
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
@@ -352,19 +326,25 @@ class TestManifest:
 
 
 # ============================================================
-# 配置默认值（v1.1.0：智能分句默认关闭 + 新增回显开关默认关闭）
+# 配置模型（v1.1.1：分段字段已移除；回显开关保留且默认关闭）
 # ============================================================
 
 
 class TestConfigDefaults:
-    def test_split_sentences_default_off(self):
-        assert GeneralConfig().split_sentences is False
+    def test_split_sentences_field_removed(self):
+        assert "split_sentences" not in GeneralConfig.model_fields
+
+    def test_split_delay_field_removed(self):
+        assert "split_delay" not in GeneralConfig.model_fields
 
     def test_echo_original_text_default_off(self):
         assert GeneralConfig().echo_original_text is False
 
+    def test_max_text_length_still_present(self):
+        assert "max_text_length" in GeneralConfig.model_fields
+
     def test_config_version_bumped(self):
-        assert PluginSectionConfig().config_version == "1.1.0"
+        assert PluginSectionConfig().config_version == "1.1.1"
 
 
 # ============================================================
@@ -373,20 +353,14 @@ class TestConfigDefaults:
 
 
 class TestBuildEchoText:
-    def test_strips_split_marker(self):
-        out = SBV2TTSPlugin._build_echo_text("今天|||SPLIT|||天气好")
-        assert "|||SPLIT|||" not in out
-        assert "今天" in out and "天气好" in out
-        assert out == "今天\n天气好"
+    def test_returns_stripped_text(self):
+        assert SBV2TTSPlugin._build_echo_text("  你好世界  ") == "你好世界"
 
-    def test_single_segment_preserved(self):
-        assert SBV2TTSPlugin._build_echo_text("你好世界") == "你好世界"
+    def test_multiline_preserved(self):
+        assert SBV2TTSPlugin._build_echo_text("第一行\n第二行") == "第一行\n第二行"
 
     def test_empty_returns_empty(self):
         assert SBV2TTSPlugin._build_echo_text("") == ""
-
-    def test_blank_lines_collapsed(self):
-        assert SBV2TTSPlugin._build_echo_text("a|||SPLIT||| |||SPLIT|||b") == "a\nb"
 
 
 # ============================================================
@@ -421,6 +395,49 @@ class TestEchoScope:
             "and self.config.general.translate_to_japanese"
         ) in norm
         assert "sync_to_maisaka_history=False" in norm
+
+
+# ============================================================
+# 分段子系统已移除（源码不变量）
+# ============================================================
+
+
+class TestSegmentationRemoved:
+    @pytest.fixture
+    def plugin_source(self) -> str:
+        path = os.path.join(PLUGIN_DIR, "plugin.py")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    @pytest.fixture
+    def translate_source(self) -> str:
+        path = os.path.join(PLUGIN_DIR, "translate.py")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    @pytest.fixture
+    def text_source(self) -> str:
+        path = os.path.join(PLUGIN_DIR, "utils", "text.py")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_plugin_no_split_symbols(self, plugin_source: str):
+        for token in (
+            "split_sentences",
+            "_SPLIT_MARKER",
+            "|||SPLIT|||",
+            "clamp_sentences",
+            "_send_in_segments",
+            "split_delay",
+        ):
+            assert token not in plugin_source, f"plugin.py 仍残留 {token}"
+
+    def test_translate_no_split_marker(self, translate_source: str):
+        assert "|||SPLIT|||" not in translate_source
+
+    def test_text_utils_split_clamp_removed(self, text_source: str):
+        assert "def split_sentences" not in text_source
+        assert "def clamp_sentences" not in text_source
 
 
 # ============================================================
