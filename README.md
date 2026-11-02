@@ -115,8 +115,6 @@ max_tokens = 512                        # （仅 index_translate）生成 token 
 api_url = "http://127.0.0.1:5000/voice"
 # 默认音色名（取自 voices 列表中某项）
 default_voice = "Ling v2"
-# 文本语言：JP / EN / ZH（默认 JP）
-language = "JP"
 # 语速，基准 1.0，越大越慢
 length = 1.0
 # 可选音色列表。-v 参数与 default_voice 从该列表匹配
@@ -149,7 +147,6 @@ command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command
 | `[translate]` | `max_tokens` | **仅 index_translate**：生成 token 上限，默认 512 |
 | `[voice]` | `api_url` | 推理服务端点，默认 `http://127.0.0.1:5000/voice` |
 | `[voice]` | `default_voice` | 默认音色名称 |
-| `[voice]` | `language` | 合成语种代码（`JP` / `EN` / `ZH`） |
 | `[voice]` | `length` | 语速调节，默认 1.0 |
 | `[voice]` | `voices` | 可选音色名称列表（字符串数组，完美适配 WebUI） |
 

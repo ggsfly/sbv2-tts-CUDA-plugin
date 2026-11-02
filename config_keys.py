@@ -43,6 +43,5 @@ class ConfigKeys:
     # ========== Voice 推理服务配置 ==========
     VOICE_API_URL: Final[str] = "voice.api_url"
     VOICE_DEFAULT_VOICE: Final[str] = "voice.default_voice"
-    VOICE_LANGUAGE: Final[str] = "voice.language"
     VOICE_LENGTH: Final[str] = "voice.length"
     VOICE_VOICES: Final[str] = "voice.voices"

@@ -4,7 +4,7 @@ Style-Bert-VITS2 (CUDA) 后端实现。
 调用本地 Style-Bert-VITS2 FastAPI 服务的 ``/voice`` 接口：
 
 - 请求：POST，**全部参数走 query string**（FastAPI ``Query``，即使 POST 也不读 body）
-- 参数：``text``、``model_name``、``speaker_name``、``style``、``language``、``length`` 等
+- 参数：``text``、``model_name``、``speaker_name``、``style``、``language``（固定 JP）、``length`` 等
 - 响应：200 -> WAV 音频二进制（RIFF 头）；422 -> JSON ``{"detail":[{"msg":...}]}``
 """
 
@@ -82,7 +82,6 @@ class VoiceBackend(TTSBackendBase):
 
         # 配置读取
         api_url = self.get_config(ConfigKeys.VOICE_API_URL, "http://127.0.0.1:5000/voice")
-        language = self.get_config(ConfigKeys.VOICE_LANGUAGE, "JP")
         length = self.get_config(ConfigKeys.VOICE_LENGTH, 1.0)
         timeout = self.get_config(ConfigKeys.GENERAL_TIMEOUT, 60)
 
@@ -95,12 +94,14 @@ class VoiceBackend(TTSBackendBase):
         )
 
         # Style-Bert-VITS2 全部走 query 参数
+        # language 固定 "JP"：当前模型仅支持日文输入，中文等语种会胡言乱语，
+        # 该项无配置意义（v1.2.1 起移除配置字段），保留参数以对齐服务端契约
         params: dict[str, Any] = {
             "text": text,
             "model_name": profile.model,
             "speaker_name": profile.speaker,
             "style": profile.style,
-            "language": language,
+            "language": "JP",
             "length": length,
         }
 

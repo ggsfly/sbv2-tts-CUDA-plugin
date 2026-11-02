@@ -75,6 +75,7 @@ IndexTranslateTranslator = translate_mod.IndexTranslateTranslator
 ConfigKeys = config_keys_mod.ConfigKeys
 GeneralConfig = plugin_mod.GeneralConfig
 PluginSectionConfig = plugin_mod.PluginSectionConfig
+VoiceConfig = plugin_mod.VoiceConfig
 TranslateConfig = plugin_mod.TranslateConfig
 SBV2TTSPluginConfig = plugin_mod.SBV2TTSPluginConfig
 SBV2TTSPlugin = plugin_mod.SBV2TTSPlugin
@@ -510,7 +511,6 @@ class TestBackendProfileResolution:
         table = {
             ConfigKeys.VOICE_API_URL: "http://127.0.0.1:5000/voice",
             ConfigKeys.VOICE_DEFAULT_VOICE: voice_name,
-            ConfigKeys.VOICE_LANGUAGE: "JP",
             ConfigKeys.VOICE_LENGTH: 1.0,
             ConfigKeys.VOICE_VOICES: voices,
             ConfigKeys.GENERAL_TIMEOUT: 60,
@@ -587,6 +587,10 @@ class TestConfigDefaults:
         """v1.2.1：翻译开关与 host_llm 模型选择归拢到 [translate] 节。"""
         assert "translate_to_japanese" not in GeneralConfig.model_fields
         assert "translate_model" not in GeneralConfig.model_fields
+
+    def test_voice_language_field_removed(self):
+        """v1.2.1：language 配置移除——当前模型仅支持日文，多语种无意义。"""
+        assert "language" not in VoiceConfig.model_fields
 
     def test_section_order_follows_pipeline(self):
         """v1.2.1：节顺序对齐数据流 通用→翻译→合成，组件开关殿后。"""

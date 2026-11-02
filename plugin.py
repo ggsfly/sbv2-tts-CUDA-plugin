@@ -158,7 +158,6 @@ class VoiceConfig(PluginConfigBase):
         description="Style-Bert-VITS2 API 地址，需指向 /voice 端点",
     )
     default_voice: str = Field(default="Ling v2", description="默认音色名（取自 voices 列表）")
-    language: str = Field(default="JP", description="文本语言：JP / EN / ZH")
     length: float = Field(default=1.0, description="语速，基准 1.0，越大越慢")
     voices: List[str] = Field(
         default_factory=lambda: ["Ling v2", "Fusetsu_v1.5"],
