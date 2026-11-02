@@ -30,7 +30,7 @@ LLM 调取规范
   解析；模型无效时 Host 报错，翻译失败如实暴露（不静默回退）。
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import aiohttp
 import asyncio
@@ -177,12 +177,12 @@ class TranslateConfig(PluginConfigBase):
         default=True,
         description="是否先把中文翻译为日文再合成（Style-Bert-VITS2 为日文推理模型）",
     )
-    engine: str = Field(
+    engine: Literal["host_llm", "index_translate"] = Field(
         default="host_llm",
         description=(
-            "翻译引擎：host_llm = 宿主 LLM（translate_model，消耗大模型 API）；"
+            "翻译引擎（下拉选择）：host_llm = 宿主 LLM（translate_model，消耗大模型 API）；"
             "index_translate = 本地 Index-Translate 服务（OpenAI 兼容端点，"
-            "需自行部署 llama-server，见 README）。填错时回落 host_llm。"
+            "需自行部署 llama-server，见 README）。其他值在加载校验时直接报错。"
         ),
         json_schema_extra={
             "hint": (
@@ -285,7 +285,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
         await self._probe_service()
 
-        if self._get_translate_engine() == "index_translate":
+        if self.config.translate.engine == "index_translate":
             await self._probe_translate_service()
 
         if not self.config.components.tool_enabled:
@@ -542,17 +542,6 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
     # ─── 内部：翻译 ──────────────────────────────────────────────────────
 
-    def _get_translate_engine(self) -> str:
-        """读取 ``[translate].engine`` 并归一化；填错值回落 host_llm。"""
-
-        engine = (self.config.translate.engine or "").strip().lower()
-        if engine not in ("host_llm", "index_translate"):
-            self.ctx.logger.warning(
-                "translate.engine 配置值无效: %r，回落 host_llm", engine,
-            )
-            return "host_llm"
-        return engine
-
     async def _translate_text(
         self,
         text: str,
@@ -574,7 +563,8 @@ class SBV2TTSPlugin(MaiBotPlugin):
         if not self.config.translate.translate_to_japanese:
             return True, text
 
-        if self._get_translate_engine() == "index_translate":
+        # engine 为 Literal 校验字段，非法值在加载时即报错，此处无需兜底
+        if self.config.translate.engine == "index_translate":
             return await self._translate_via_index_translate(text, log_prefix)
         return await self._translate_via_host_llm(text, log_prefix)
 

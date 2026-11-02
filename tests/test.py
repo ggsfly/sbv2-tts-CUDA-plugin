@@ -17,6 +17,9 @@ import types
 import asyncio
 from typing import Any, Dict, List, Tuple
 
+from maibot_sdk.config import generate_plugin_config_schema
+from pydantic import ValidationError
+
 import pytest
 
 # ============================================================
@@ -73,6 +76,7 @@ ConfigKeys = config_keys_mod.ConfigKeys
 GeneralConfig = plugin_mod.GeneralConfig
 PluginSectionConfig = plugin_mod.PluginSectionConfig
 TranslateConfig = plugin_mod.TranslateConfig
+SBV2TTSPluginConfig = plugin_mod.SBV2TTSPluginConfig
 SBV2TTSPlugin = plugin_mod.SBV2TTSPlugin
 
 
@@ -438,6 +442,17 @@ class TestIndexTranslateTranslator:
 class TestTranslateConfigDefaults:
     def test_engine_default_host_llm(self):
         assert TranslateConfig().engine == "host_llm"
+
+    def test_engine_schema_renders_select_choices(self):
+        """engine 必须是 Literal 双值：WebUI 依据 choices 渲染下拉而非文本输入。"""
+        schema = generate_plugin_config_schema(SBV2TTSPluginConfig)
+        engine_field = schema["sections"]["translate"]["fields"]["engine"]
+        assert engine_field["choices"] == ["host_llm", "index_translate"]
+
+    def test_engine_rejects_invalid_value(self):
+        """非法 engine 值在加载校验时直接报错（不静默回落）。"""
+        with pytest.raises(ValidationError):
+            TranslateConfig(engine="openai")
 
     def test_translate_to_japanese_default_on(self):
         """v1.2.1 自 [general] 迁入，默认值保持 true。"""

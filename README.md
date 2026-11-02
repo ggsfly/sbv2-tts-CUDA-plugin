@@ -6,7 +6,7 @@ MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推�
 >
 > **v1.2.0 新增**：翻译引擎可切换（`[translate].engine`）——既可继续走宿主 LLM（`host_llm`），也可直连本地部署的 **Index-Translate** 翻译模型（`index_translate`，OpenAI 兼容端点，零 API 成本、低延迟，支持术语表硬约束与风格软约束）。
 >
-> **v1.2.1 调整**：翻译设置归拢至 `[translate]` 节（`translate_to_japanese`、`translate_model` 自 `[general]` 迁入）；配置节按数据流重排（通用 → 翻译 → 合成 → 组件开关），config.toml 生成顺序与 WebUI 显示顺序同步生效。从 1.2.0 升级时由 Runner 自动迁移，跨节迁移的键按默认值处理。
+> **v1.2.1 调整**：翻译设置归拢至 `[translate]` 节（`translate_to_japanese`、`translate_model` 自 `[general]` 迁入）；配置节按数据流重排（通用 → 翻译 → 合成 → 组件开关），config.toml 生成顺序与 WebUI 显示顺序同步生效；`engine` 字段为 Literal 双值校验，WebUI 渲染为下拉选择。从 1.2.0 升级时由 Runner 自动迁移，跨节迁移的键按默认值处理。
 
 ---
 
@@ -139,7 +139,7 @@ command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command
 | `[general]` | `send_error_messages` | 合成或翻译失败时是否回显错误文本 |
 | `[general]` | `echo_original_text` | **仅 @Tool**：发语音前回显一条整段中文原文（不分割、不回 planner；**默认关闭**，`translate_to_japanese=false` 时不生效） |
 | `[translate]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true`（v1.2.1 自 `[general]` 迁入） |
-| `[translate]` | `engine` | 翻译引擎：`host_llm`（默认）/ `index_translate`；填错回落 `host_llm` |
+| `[translate]` | `engine` | 翻译引擎（**WebUI 下拉选择**）：`host_llm`（默认）/ `index_translate`；其他值在加载校验时直接报错 |
 | `[translate]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务（**仅 `host_llm` 引擎**；v1.2.1 自 `[general]` 迁入） |
 | `[translate]` | `base_url` | **仅 index_translate**：OpenAI 兼容端点，默认 `http://127.0.0.1:8020/v1` |
 | `[translate]` | `model` | **仅 index_translate**：模型名，与 llama-server `--alias` 一致，默认 `Index-Translate-2B` |
