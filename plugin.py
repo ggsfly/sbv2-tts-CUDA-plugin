@@ -11,8 +11,10 @@
 
  管线（Tool 与 Command 共用，一次性整段合成单条语音）：
 1. 文本清理（去除首尾空白）
-2. 若 ``general.translate_to_japanese`` 开启，调用 :class:`JPTranslator` 把整段
-   中文译为日文（翻译失败时 **绝不** 用中文喂推理服务，直接如实暴露错误）
+2. 若 ``general.translate_to_japanese`` 开启，按 ``[translate].engine`` 选择
+   翻译引擎把整段中文译为日文（:class:`JPTranslator` 走宿主 LLM，或
+   :class:`IndexTranslateTranslator` 走本地 Index-Translate OpenAI 兼容端点；
+   翻译失败时 **绝不** 用中文喂推理服务，直接如实暴露错误）
 3. 【仅 Tool】若 ``general.echo_original_text`` 开启，在投递语音前用
    ``ctx.send.text`` 回显一条整段中文原文，且 ``sync_to_maisaka_history=False``
    不写 maisaka 历史（不返回 planner）
@@ -36,12 +38,14 @@ import logging
 import re
 import sys
 
+from functools import partial
+
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
 
 from .backends import TTSBackendRegistry, VoiceBackend, VoiceProfile
 from .backends.base import TTSResult
-from .translate import JPTranslator
+from .translate import IndexTranslateTranslator, JPTranslator
 from .utils.session import TTSSessionManager
 from .utils.text import TTSTextUtils
 
@@ -58,6 +62,9 @@ _VOICE_PLACEHOLDER_LINE_PATTERN = re.compile(r"^[ \t]*\[语音消息\][ \t]*(?:\
 
 # 后端注册表注册名（与 ``VoiceBackend.backend_name`` 保持一致）
 _BACKEND_NAME = "voice"
+
+# Index-Translate 翻译引擎在 TTSSessionManager 中的连接池隔离名
+_INDEX_TRANSLATE_SESSION_NAME = "index_translate"
 
 # 连接性探测目标：Style-Bert-VITS2 的 /models/info（GET，返回已加载模型信息）
 _PROBE_URL = "http://127.0.0.1:5000/models/info"
@@ -81,7 +88,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.1.1", description="配置版本")
+    config_version: str = Field(default="1.2.0", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -130,7 +137,7 @@ class GeneralConfig(PluginConfigBase):
     translate_model: str = Field(
         default="",
         description=(
-            "翻译用 LLM，支持两种填法："
+            "（仅 translate.engine = host_llm 时生效）翻译用 LLM，支持两种填法："
             "① 任务名（replyer / utils / planner / memory 等）；"
             "② 模型名 / 模型标识符（model_config.toml 中 [[models]] 的 name 或 model_identifier）。"
             "留空 = replyer 任务。命中任务名按任务调用；否则视为模型名直传 Host 解析，"
@@ -177,6 +184,61 @@ class VoiceConfig(PluginConfigBase):
     )
 
 
+class TranslateConfig(PluginConfigBase):
+    """翻译引擎配置（中→日，v1.2.0 起支持本地 Index-Translate 引擎）。"""
+
+    __ui_label__ = "翻译"
+    __ui_icon__ = "languages"
+    __ui_order__ = 4
+
+    engine: str = Field(
+        default="host_llm",
+        description=(
+            "翻译引擎：host_llm = 宿主 LLM（general.translate_model，消耗大模型 API）；"
+            "index_translate = 本地 Index-Translate 服务（OpenAI 兼容端点，"
+            "需自行部署 llama-server，见 README）。填错时回落 host_llm。"
+        ),
+        json_schema_extra={
+            "hint": (
+                "index_translate 引擎零 API 成本、延迟低（本机 2B 模型约 0.3~0.6 秒/条）；"
+                "base_url 指向 http://127.0.0.1:8020/v1（llama-server 默认端口 8020，"
+                "避开 MaiBot 消息服务器的 8000）。"
+            ),
+        },
+    )
+    base_url: str = Field(
+        default="http://127.0.0.1:8020/v1",
+        description="（仅 index_translate 引擎）OpenAI 兼容端点根地址，不带末尾斜杠",
+    )
+    model: str = Field(
+        default="Index-Translate-2B",
+        description="（仅 index_translate 引擎）模型名，与 llama-server --alias 一致",
+    )
+    style: str = Field(
+        default="",
+        description=(
+            "（仅 index_translate 引擎）风格软约束，进 prompt【注意】段，"
+            "如：保持口语化、自然的直播说话风格，保留语气词与情绪，使用女性口吻。"
+            "留空 = 无约束直译"
+        ),
+    )
+    glossary: List[str] = Field(
+        default_factory=list,
+        description=(
+            "（仅 index_translate 引擎）术语表硬约束，每条形如 '中文→日本語'，"
+            "如 '苦力怕→クリーパー'；多条时全部进 prompt【硬性要求】"
+        ),
+    )
+    timeout: int = Field(
+        default=30,
+        description="（仅 index_translate 引擎）单次翻译请求超时（秒）",
+    )
+    max_tokens: int = Field(
+        default=512,
+        description="（仅 index_translate 引擎）生成 token 上限；官方短台词建议 512",
+    )
+
+
 class SBV2TTSPluginConfig(PluginConfigBase):
     """Style-Bert-VITS2 日文语音合成插件总配置。"""
 
@@ -184,6 +246,7 @@ class SBV2TTSPluginConfig(PluginConfigBase):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     components: ComponentsConfig = Field(default_factory=ComponentsConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    translate: TranslateConfig = Field(default_factory=TranslateConfig)
 
 
 # ─── 插件主体 ────────────────────────────────────────────────────────────
@@ -207,11 +270,16 @@ class SBV2TTSPlugin(MaiBotPlugin):
         """插件加载钩子。
 
         1. 短超时探测 Style-Bert-VITS2 服务存活（GET /models/info）。
-        2. 按 ``[components]`` 配置禁用 Tool / Command 组件。
-        3. 不阻断插件加载：未连通只发 warning。
+        2. 若翻译引擎为 index_translate，短超时探测其 OpenAI 兼容端点
+           （GET {base_url}/models）。
+        3. 按 ``[components]`` 配置禁用 Tool / Command 组件。
+        4. 不阻断插件加载：未连通只发 warning。
         """
 
         await self._probe_service()
+
+        if self._get_translate_engine() == "index_translate":
+            await self._probe_translate_service()
 
         if not self.config.components.tool_enabled:
             await self.ctx.component.disable_component(
@@ -323,6 +391,35 @@ class SBV2TTSPlugin(MaiBotPlugin):
             self.ctx.logger.warning(
                 "Style-Bert-VITS2 服务未连通，路径=%s，原因=%s",
                 _PROBE_URL, exc,
+            )
+
+    async def _probe_translate_service(self) -> None:
+        """短超时探测 Index-Translate 翻译服务存活（仅 index_translate 引擎调用）。
+
+        与 :meth:`_probe_service` 同语义：任意 HTTP 状态码都视为"服务监听中"，
+        仅连接被拒 / 超时 / DNS 失败视为未连通。未连通仅 warning，不抛错。
+        目标 URL 由 ``[translate].base_url`` 动态拼出，不复用硬编码常量。
+        """
+
+        probe_url = f"{self.config.translate.base_url.rstrip('/')}/models"
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=_PROBE_TIMEOUT_SECONDS)
+            ) as session:
+                try:
+                    async with session.get(probe_url) as resp:
+                        del resp
+                except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
+                    self.ctx.logger.warning(
+                        "Index-Translate 翻译服务未连通，路径=%s，原因=%s"
+                        "（index_translate 引擎的翻译请求将失败，"
+                        "请检查 llama-server 是否已启动）",
+                        probe_url, exc,
+                    )
+        except (aiohttp.ClientError, OSError) as exc:
+            self.ctx.logger.warning(
+                "Index-Translate 翻译服务未连通，路径=%s，原因=%s",
+                probe_url, exc,
             )
 
     # ─── 内部：配置桥接 ──────────────────────────────────────────────────
@@ -438,12 +535,23 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
     # ─── 内部：翻译 ──────────────────────────────────────────────────────
 
+    def _get_translate_engine(self) -> str:
+        """读取 ``[translate].engine`` 并归一化；填错值回落 host_llm。"""
+
+        engine = (self.config.translate.engine or "").strip().lower()
+        if engine not in ("host_llm", "index_translate"):
+            self.ctx.logger.warning(
+                "translate.engine 配置值无效: %r，回落 host_llm", engine,
+            )
+            return "host_llm"
+        return engine
+
     async def _translate_text(
         self,
         text: str,
         log_prefix: str,
     ) -> Tuple[bool, str]:
-        """根据配置决定是否翻译为日文。
+        """根据配置决定是否翻译为日文，并按 ``[translate].engine`` 路由引擎。
 
         Args:
             text: 待翻译中文文本（已清理非空）。
@@ -458,6 +566,59 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
         if not self.config.general.translate_to_japanese:
             return True, text
+
+        if self._get_translate_engine() == "index_translate":
+            return await self._translate_via_index_translate(text, log_prefix)
+        return await self._translate_via_host_llm(text, log_prefix)
+
+    async def _translate_via_index_translate(
+        self,
+        text: str,
+        log_prefix: str,
+    ) -> Tuple[bool, str]:
+        """走本地 Index-Translate OpenAI 兼容端点翻译。
+
+        HTTP 走 TTSSessionManager（隔离名 ``index_translate``），
+        ``translate.timeout`` 作为按次超时传入，不吃 session 固化的默认 60 秒。
+
+        Args:
+            text: 待翻译中文文本（已清理非空）。
+            log_prefix: 日志前缀。
+
+        Returns:
+            ``(success, payload)``，失败时绝不返回原文。
+        """
+
+        session_manager = await TTSSessionManager.get_instance()
+        translator = IndexTranslateTranslator(
+            base_url=self.config.translate.base_url,
+            model=self.config.translate.model,
+            max_length=self.config.general.max_text_length,
+            style=self.config.translate.style,
+            glossary=tuple(self.config.translate.glossary),
+            timeout=self.config.translate.timeout,
+            max_tokens=self.config.translate.max_tokens,
+            post_factory=partial(
+                session_manager.post,
+                backend_name=_INDEX_TRANSLATE_SESSION_NAME,
+            ),
+        )
+        return await translator.translate(text, log_prefix)
+
+    async def _translate_via_host_llm(
+        self,
+        text: str,
+        log_prefix: str,
+    ) -> Tuple[bool, str]:
+        """走宿主 LLM（``ctx.llm.generate``）翻译，即 v1.1.1 的既有路径。
+
+        Args:
+            text: 待翻译中文文本（已清理非空）。
+            log_prefix: 日志前缀。
+
+        Returns:
+            ``(success, payload)``，失败时绝不返回原文。
+        """
 
         task_name, model_name = await self._resolve_translate_llm()
         translator = JPTranslator(

@@ -68,9 +68,11 @@ TTSFileManager = sys.modules[f"{PACKAGE_NAME}.utils.file"].TTSFileManager
 VoiceBackend = voice_mod.VoiceBackend
 VoiceProfile = voice_mod.VoiceProfile
 JPTranslator = translate_mod.JPTranslator
+IndexTranslateTranslator = translate_mod.IndexTranslateTranslator
 ConfigKeys = config_keys_mod.ConfigKeys
 GeneralConfig = plugin_mod.GeneralConfig
 PluginSectionConfig = plugin_mod.PluginSectionConfig
+TranslateConfig = plugin_mod.TranslateConfig
 SBV2TTSPlugin = plugin_mod.SBV2TTSPlugin
 
 
@@ -236,6 +238,218 @@ class TestTranslate:
         assert len(fake.calls) == 0
 
 
+class FakeResponse:
+    """最小 aiohttp.ClientResponse 假体：仅提供 status / read()。"""
+
+    def __init__(self, status: int = 200, body: bytes = b"") -> None:
+        self.status = status
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+class FakePostFactory:
+    """与 TTSSessionManager.post 同构的可编程假 post 上下文工厂。
+
+    记录每次调用的 url / json / timeout；raise_in_enter 模拟连接层异常。
+    """
+
+    def __init__(self, response: FakeResponse) -> None:
+        self._response = response
+        self.calls: List[Dict[str, Any]] = []
+        self.raise_in_enter: Exception | None = None
+
+    def __call__(self, url: str, *, json: Dict[str, Any], timeout: int) -> "FakePostFactory":
+        self.calls.append({"url": url, "json": json, "timeout": timeout})
+        return self
+
+    async def __aenter__(self) -> FakeResponse:
+        if self.raise_in_enter is not None:
+            raise self.raise_in_enter
+        return self._response
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        return False
+
+
+def _openai_body(content: str) -> bytes:
+    """构造 OpenAI chat/completions 成功响应字节。"""
+
+    return json.dumps(
+        {"choices": [{"message": {"content": content}}]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _make_translator(post_factory: FakePostFactory, **kwargs: Any) -> IndexTranslateTranslator:
+    """构造注入假 post 工厂的翻译器，默认参数对齐生产装配。"""
+
+    defaults: Dict[str, Any] = {
+        "base_url": "http://127.0.0.1:8020/v1",
+        "model": "Index-Translate-2B",
+        "max_length": 100,
+        "timeout": 30,
+        "max_tokens": 512,
+    }
+    defaults.update(kwargs)
+    return IndexTranslateTranslator(post_factory=post_factory, **defaults)
+
+
+class TestIndexTranslateTranslator:
+    def test_success_returns_translated_text(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("こんにちは")))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is True
+        assert payload == "こんにちは"
+        assert len(fake.calls) == 1
+
+    def test_request_payload_matches_official_recommendation(self):
+        """请求体必须对齐官方要点：temperature=0、关思考、非流式、模型名。"""
+        fake = FakePostFactory(FakeResponse(200, _openai_body("テスト")))
+        _run(_make_translator(fake).translate("测试", "[t]"))
+        sent = fake.calls[0]["json"]
+        assert sent["model"] == "Index-Translate-2B"
+        assert sent["temperature"] == 0
+        assert sent["stream"] is False
+        assert sent["chat_template_kwargs"] == {"enable_thinking": False}
+        assert sent["messages"][0]["role"] == "user"
+        assert "测试" in sent["messages"][0]["content"]
+
+    def test_url_and_per_call_timeout_forwarded(self):
+        """URL 拼 chat/completions；translate.timeout 按次透传不吃默认 60s。"""
+        fake = FakePostFactory(FakeResponse(200, _openai_body("テスト")))
+        _run(_make_translator(fake, timeout=17).translate("测试", "[t]"))
+        assert fake.calls[0]["url"] == "http://127.0.0.1:8020/v1/chat/completions"
+        assert fake.calls[0]["timeout"] == 17
+
+    def test_strips_think_blocks(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("<think>推理过程</think>こんにちは")))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is True
+        assert payload == "こんにちは"
+        assert "推理" not in payload
+
+    def test_plain_prompt_when_no_constraints(self):
+        """无术语表/风格时用无约束直译模板，不含约束段。"""
+        fake = FakePostFactory(FakeResponse(200, _openai_body("さようなら")))
+        _run(_make_translator(fake, max_length=0).translate("再见", "[t]"))
+        prompt = fake.calls[0]["json"]["messages"][0]["content"]
+        assert "请将以下文本翻译为日语" in prompt
+        assert "【约束要求】" not in prompt
+        assert "再见" in prompt
+
+    def test_constrained_prompt_contains_glossary_style_length(self):
+        """instTrans 格式：术语表与长度进【硬性要求】，风格进【注意】。"""
+        fake = FakePostFactory(FakeResponse(200, _openai_body("クリーパー")))
+        translator = _make_translator(
+            fake,
+            glossary=("苦力怕→クリーパー", "僵尸→ゾンビ"),
+            style="保持口语化、自然的直播说话风格",
+            max_length=80,
+        )
+        _run(translator.translate("我玩苦力怕", "[t]"))
+        prompt = fake.calls[0]["json"]["messages"][0]["content"]
+        assert "【约束要求】" in prompt
+        assert "苦力怕→クリーパー、僵尸→ゾンビ" in prompt
+        assert "【硬性要求】" in prompt
+        assert "80" in prompt
+        assert "【注意】保持口语化、自然的直播说话风格" in prompt
+        assert "【源文】" in prompt
+
+    def test_non_200_returns_failure_with_status(self):
+        fake = FakePostFactory(FakeResponse(504, b"gateway timeout"))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert "504" in payload
+        assert "你好" not in payload
+
+    def test_malformed_json_returns_failure(self):
+        fake = FakePostFactory(FakeResponse(200, b"not json"))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert "JSON" in payload
+
+    def test_missing_choices_returns_failure(self):
+        fake = FakePostFactory(FakeResponse(200, json.dumps({"error": "bad"}).encode()))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert payload
+        assert "你好" not in payload
+
+    def test_empty_content_returns_failure(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("")))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert payload
+        assert "你好" not in payload
+
+    def test_think_only_content_returns_failure(self):
+        """enable_thinking 失效导致整段是思维链时：失败暴露，不回原文。"""
+        fake = FakePostFactory(FakeResponse(200, _openai_body("<think>只有思维链</think>")))
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert "你好" not in payload
+
+    def test_timeout_returns_failure(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("こんにちは")))
+        fake.raise_in_enter = asyncio.TimeoutError("request timeout")
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert payload
+
+    def test_connection_error_returns_failure(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("こんにちは")))
+        fake.raise_in_enter = ConnectionRefusedError("connection refused")
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert payload
+
+    def test_generic_exception_returns_failure(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("こんにちは")))
+        fake.raise_in_enter = KeyError("boom")
+        ok, payload = _run(_make_translator(fake).translate("你好", "[t]"))
+        assert ok is False
+        assert "boom" in payload
+
+    def test_empty_text_short_circuits(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("何か")))
+        ok, payload = _run(_make_translator(fake).translate("", "[t]"))
+        assert ok is False
+        assert payload == ""
+        assert len(fake.calls) == 0
+
+    def test_missing_post_factory_exposes_error(self):
+        translator = IndexTranslateTranslator(
+            base_url="http://127.0.0.1:8020/v1",
+            model="Index-Translate-2B",
+        )
+        ok, payload = _run(translator.translate("你好", "[t]"))
+        assert ok is False
+        assert "post_factory" in payload
+
+    def test_base_url_trailing_slash_normalized(self):
+        fake = FakePostFactory(FakeResponse(200, _openai_body("テスト")))
+        translator = _make_translator(fake, base_url="http://127.0.0.1:8020/v1/")
+        _run(translator.translate("测试", "[t]"))
+        assert fake.calls[0]["url"] == "http://127.0.0.1:8020/v1/chat/completions"
+
+
+class TestTranslateConfigDefaults:
+    def test_engine_default_host_llm(self):
+        assert TranslateConfig().engine == "host_llm"
+
+    def test_base_url_default_uses_port_8020(self):
+        """默认端口必须是 8020——8000 被 MaiBot 主消息服务器占用。"""
+        assert TranslateConfig().base_url == "http://127.0.0.1:8020/v1"
+
+    def test_model_default(self):
+        assert TranslateConfig().model == "Index-Translate-2B"
+
+    def test_glossary_default_empty(self):
+        assert TranslateConfig().glossary == []
+
+
 # ============================================================
 # backend 层
 # ============================================================
@@ -310,7 +524,7 @@ class TestManifest:
         assert manifest["id"] == "ggsfly.sbv2-tts-cuda-plugin"
 
     def test_version_initial(self, manifest: dict):
-        assert manifest["version"] == "1.1.1"
+        assert manifest["version"] == "1.2.0"
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
@@ -344,7 +558,7 @@ class TestConfigDefaults:
         assert "max_text_length" in GeneralConfig.model_fields
 
     def test_config_version_bumped(self):
-        assert PluginSectionConfig().config_version == "1.1.1"
+        assert PluginSectionConfig().config_version == "1.2.0"
 
 
 # ============================================================

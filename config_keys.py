@@ -26,6 +26,15 @@ class ConfigKeys:
     GENERAL_TRANSLATE_TO_JAPANESE: Final[str] = "general.translate_to_japanese"
     GENERAL_TRANSLATE_MODEL: Final[str] = "general.translate_model"
 
+    # ========== Translate 翻译引擎配置（v1.2.0）==========
+    TRANSLATE_ENGINE: Final[str] = "translate.engine"
+    TRANSLATE_BASE_URL: Final[str] = "translate.base_url"
+    TRANSLATE_MODEL: Final[str] = "translate.model"
+    TRANSLATE_STYLE: Final[str] = "translate.style"
+    TRANSLATE_GLOSSARY: Final[str] = "translate.glossary"
+    TRANSLATE_TIMEOUT: Final[str] = "translate.timeout"
+    TRANSLATE_MAX_TOKENS: Final[str] = "translate.max_tokens"
+
     # ========== Components 组件配置 ==========
     COMPONENTS_TOOL_ENABLED: Final[str] = "components.tool_enabled"
     COMPONENTS_COMMAND_ENABLED: Final[str] = "components.command_enabled"

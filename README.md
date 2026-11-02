@@ -2,7 +2,9 @@
 
 MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推理服务合成日文语音。Style-Bert-VITS2 是日文推理模型，因此插件会先把输入文本翻译为自然日文，再送入本地推理服务合成语音，输出自然、地道的日文语音。
 
-> **v1.1.1** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。每条输入**一次性整段合成单条语音**（已移除智能分句 / `|||SPLIT|||` 分段 / 超长自动截断等分段子系统）；保留可选「语音前回显中文原文」（仅 @Tool，默认关闭）。
+> **v1.2.0** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。每条输入**一次性整段合成单条语音**（已移除智能分句 / `|||SPLIT|||` 分段 / 超长自动截断等分段子系统）；保留可选「语音前回显中文原文」（仅 @Tool，默认关闭）。
+>
+> **v1.2.0 新增**：翻译引擎可切换（`[translate].engine`）——既可继续走宿主 LLM（`host_llm`），也可直连本地部署的 **Index-Translate** 翻译模型（`index_translate`，OpenAI 兼容端点，零 API 成本、低延迟，支持术语表硬约束与风格软约束）。
 
 ---
 
@@ -30,6 +32,38 @@ Style-Bert-VITS2-CUDA/
 2. 等待控制台输出 `server listen: http://127.0.0.1:5000`，确认服务已监听 `5000` 端口。
 3. 确认推理服务已就绪（可访问 `http://127.0.0.1:5000/docs` 查看交互式 API 文档）。
 
+### 3.（可选）本地 Index-Translate 翻译服务（Linux）
+
+若 `[translate].engine` 选 `index_translate`，需要自行部署 B 站 IndexTeam 开源的
+**Index-Translate** 翻译模型（基于 Qwen3.5，专为中→日等翻译训练，支持术语表/
+占位符等硬约束），以 llama.cpp 起 OpenAI 兼容端点。本插件同样**不自动管理**
+该服务进程。
+
+参考部署（GTX 1080 8GB 实测，可与 SBV2 服务共存）：
+
+```bash
+# 1) 获取 llama.cpp：直接用官方预编译 Vulkan 包（无需 CUDA Toolkit）
+#    https://github.com/ggml-org/llama.cpp/releases 下载
+#    llama-bXXXX-bin-ubuntu-vulkan-x64.tar.gz 解压即可
+
+# 2) 下载模型（约 1.45GB，国内可用 hf-mirror.com）
+curl -L -C - -o Index-Translate-2B.Q5_K_M.gguf \
+  "https://hf-mirror.com/IndexTeam/Index-Translate-2B-GGUF/resolve/main/Index-Translate-2B.Q5_K_M.gguf"
+
+# 3) 启动服务（端口用 8020，避开 MaiBot 主消息服务器的 8000）
+llama-server -m Index-Translate-2B.Q5_K_M.gguf \
+  --alias Index-Translate-2B -ngl 99 -c 16384 --jinja \
+  --host 127.0.0.1 --port 8020
+```
+
+- 端点：`http://127.0.0.1:8020/v1`（OpenAI 兼容），模型名 `Index-Translate-2B`。
+- 显存：整卡占用约 2.9GB（含桌面与 SBV2 进程），2B 模型稳态约 0.3~0.6 秒/条。
+- 调用要点由插件自动处理：`temperature=0`、`chat_template_kwargs.enable_thinking=false`
+  （否则思维链会混入译文）、输出剥 `<think>` 块。
+- Windows 部署与官方免费 API（`https://index-translate.bilibili.com/v1`，同协议
+  可直接填入 `[translate].base_url`）详见 Index-Translate 官方仓库：
+  https://github.com/bilibili/Index-Translate
+
 ---
 
 ## 安装与依赖
@@ -46,7 +80,7 @@ Style-Bert-VITS2-CUDA/
 ```toml
 [plugin]
 enabled = true
-config_version = "1.1.1"
+config_version = "1.2.0"
 
 [general]
 timeout = 60
@@ -61,11 +95,23 @@ translate_to_japanese = true      # 是否先把文本翻译为日文再合成
 #   1) 任务名：replyer / utils / planner / memory 等
 #   2) 模型名 / 模型标识符：model_config.toml 中 [[models]] 的 name 或 model_identifier
 # 留空 = replyer 任务。无效模型直传 Host 解析，报错即时暴露。
+# （仅 translate.engine = host_llm 时生效）
 translate_model = ""
 
 [components]
 tool_enabled = true               # LLM 自主触发的 Tool 组件（sbv2_tts_tool）
 command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command）
+
+[translate]
+# 翻译引擎：host_llm = 宿主 LLM（消耗大模型 API）；index_translate = 本地
+# Index-Translate 服务（OpenAI 兼容端点，零 API 成本，部署见上文前置条件第 3 步）
+engine = "host_llm"
+base_url = "http://127.0.0.1:8020/v1"   # （仅 index_translate）OpenAI 兼容端点
+model = "Index-Translate-2B"            # （仅 index_translate）模型名，与 llama-server --alias 一致
+style = ""                              # （仅 index_translate）风格软约束，如"保持口语化、自然的直播说话风格，使用女性口吻"
+glossary = []                           # （仅 index_translate）术语表硬约束，如 ["苦力怕→クリーパー"]
+timeout = 30                            # （仅 index_translate）单次翻译超时（秒）
+max_tokens = 512                        # （仅 index_translate）生成 token 上限
 
 [voice]
 # Style-Bert-VITS2 (CUDA) API 地址，需指向 /voice 端点
@@ -85,16 +131,23 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 | 段 | 字段 | 说明 |
 |---|---|---|
 | `[plugin]` | `enabled` | 是否启用插件（默认 `true`） |
-| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.1.1"`） |
+| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.2.0"`） |
 | `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
 | `[general]` | `max_text_length` | 译文长度上限（注入翻译 prompt，对齐服务端 `limit=100`；超长不再自动截断） |
 | `[general]` | `strip_voice_placeholder` | 剥离 replyer 回复正文中的 `[语音消息]` 占位回声，默认 `true` |
 | `[general]` | `send_error_messages` | 合成或翻译失败时是否回显错误文本 |
 | `[general]` | `echo_original_text` | **仅 @Tool**：发语音前回显一条整段中文原文（不分割、不回 planner；**默认关闭**，`translate_to_japanese=false` 时不生效） |
 | `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true` |
-| `[general]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务 |
+| `[general]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务（**仅 `host_llm` 引擎**） |
 | `[components]` | `tool_enabled` | 是否启用 `sbv2_tts_tool` Tool |
 | `[components]` | `command_enabled` | 是否启用 `/sbv2` Command |
+| `[translate]` | `engine` | 翻译引擎：`host_llm`（默认）/ `index_translate`；填错回落 `host_llm` |
+| `[translate]` | `base_url` | **仅 index_translate**：OpenAI 兼容端点，默认 `http://127.0.0.1:8020/v1` |
+| `[translate]` | `model` | **仅 index_translate**：模型名，与 llama-server `--alias` 一致，默认 `Index-Translate-2B` |
+| `[translate]` | `style` | **仅 index_translate**：风格软约束（prompt【注意】段），留空为无约束直译 |
+| `[translate]` | `glossary` | **仅 index_translate**：术语表硬约束（prompt【硬性要求】），如 `["苦力怕→クリーパー"]` |
+| `[translate]` | `timeout` | **仅 index_translate**：单次翻译请求超时（秒），默认 30 |
+| `[translate]` | `max_tokens` | **仅 index_translate**：生成 token 上限，默认 512 |
 | `[voice]` | `api_url` | 推理服务端点，默认 `http://127.0.0.1:5000/voice` |
 | `[voice]` | `default_voice` | 默认音色名称 |
 | `[voice]` | `language` | 合成语种代码（`JP` / `EN` / `ZH`） |
@@ -167,8 +220,9 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 - **检查组件日志**：查看 MaiBot 启动控制台输出，搜索 `[plugin.sbv2_tts]` 或 `ggsfly.sbv2-tts-cuda-plugin` 查找加载日志。
 
 ### 2. 语音合成失败：日文翻译失败
-- **检查翻译模型配置**：若 `translate_model` 配置了特定模型名称，请确认宿主 `config/model_config.toml` 中已注册该模型且其 API 提供方连通；留空则默认回退至 `replyer` 任务。
-- **排查错误文本**：插件会如实回显 Host 返回的错误信息（如额度耗尽、超时等），根据提示排查模型配置。
+- **检查翻译引擎**：`[translate].engine = index_translate` 时，确认本地 llama-server 已启动（`bash test_translate.sh` 自测，或 `curl http://127.0.0.1:8020/v1/models`）；服务未启动时插件加载日志会有「Index-Translate 翻译服务未连通」warning。
+- **检查翻译模型配置**（host_llm 引擎）：若 `translate_model` 配置了特定模型名称，请确认宿主 `config/model_config.toml` 中已注册该模型且其 API 提供方连通；留空则默认回退至 `replyer` 任务。
+- **排查错误文本**：插件会如实回显 Host / 翻译服务返回的错误信息（如额度耗尽、超时、HTTP 504 等），根据提示排查模型配置或翻译服务状态。
 
 ### 3. 语音合成网络错误 / 连接被拒
 - **检查 API 服务**：确认已通过 `..01 启动API服务.bat` 成功启动本地 Style-Bert-VITS2 服务，且控制台输出 `server listen: http://127.0.0.1:5000`。
@@ -199,7 +253,7 @@ ggsfly_sbv2-tts-CUDA-plugin/
 ├── .gitignore               # 忽略规则（包含 /config.toml）
 ├── config_keys.py           # 配置键常量定义
 ├── plugin.py                # 插件入口（MaiBotPlugin + Tool / Command / Hook，内置配置模型）
-├── translate.py             # 中译日翻译层（SDK 2.x task_name/model_name 驱动）
+├── translate.py             # 中译日翻译层（JPTranslator 宿主 LLM / IndexTranslateTranslator 本地服务双引擎）
 ├── README.md                # 插件使用文档
 ├── LICENSE                  # GPL-3.0-or-later
 ├── backends/                # 后端适配层
