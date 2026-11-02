@@ -5,6 +5,8 @@ MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推�
 > **v1.2.0** — 基于 MaiBot SDK 2.x 构建：原生模型/任务直连、对接 Style-Bert-VITS2 (CUDA) API（`/voice`）、Profile 音色配置、全量 base64 语音投递。每条输入**一次性整段合成单条语音**（已移除智能分句 / `|||SPLIT|||` 分段 / 超长自动截断等分段子系统）；保留可选「语音前回显中文原文」（仅 @Tool，默认关闭）。
 >
 > **v1.2.0 新增**：翻译引擎可切换（`[translate].engine`）——既可继续走宿主 LLM（`host_llm`），也可直连本地部署的 **Index-Translate** 翻译模型（`index_translate`，OpenAI 兼容端点，零 API 成本、低延迟，支持术语表硬约束与风格软约束）。
+>
+> **v1.2.1 调整**：翻译设置归拢至 `[translate]` 节（`translate_to_japanese`、`translate_model` 自 `[general]` 迁入）；配置节按数据流重排（通用 → 翻译 → 合成 → 组件开关），config.toml 生成顺序与 WebUI 显示顺序同步生效。从 1.2.0 升级时由 Runner 自动迁移，跨节迁移的键按默认值处理。
 
 ---
 
@@ -80,7 +82,7 @@ llama-server -m Index-Translate-2B.Q5_K_M.gguf \
 ```toml
 [plugin]
 enabled = true
-config_version = "1.2.0"
+config_version = "1.2.1"
 
 [general]
 timeout = 60
@@ -90,22 +92,17 @@ max_text_length = 100
 strip_voice_placeholder = true    # 剥离 replyer 正文中的 [语音消息] 占位回声
 send_error_messages = true        # 合成失败时是否向聊天流回显错误提示
 echo_original_text = false        # 仅 @Tool：发语音前回显一条整段中文原文（默认关闭）
-translate_to_japanese = true      # 是否先把文本翻译为日文再合成
-# 翻译用 LLM。支持两种填法：
-#   1) 任务名：replyer / utils / planner / memory 等
-#   2) 模型名 / 模型标识符：model_config.toml 中 [[models]] 的 name 或 model_identifier
-# 留空 = replyer 任务。无效模型直传 Host 解析，报错即时暴露。
-# （仅 translate.engine = host_llm 时生效）
-translate_model = ""
-
-[components]
-tool_enabled = true               # LLM 自主触发的 Tool 组件（sbv2_tts_tool）
-command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command）
 
 [translate]
+translate_to_japanese = true      # 是否先把文本翻译为日文再合成
 # 翻译引擎：host_llm = 宿主 LLM（消耗大模型 API）；index_translate = 本地
 # Index-Translate 服务（OpenAI 兼容端点，零 API 成本，部署见上文前置条件第 3 步）
 engine = "host_llm"
+# （仅 engine = host_llm）翻译用 LLM。支持两种填法：
+#   1) 任务名：replyer / utils / planner / memory 等
+#   2) 模型名 / 模型标识符：model_config.toml 中 [[models]] 的 name 或 model_identifier
+# 留空 = replyer 任务。无效模型直传 Host 解析，报错即时暴露。
+translate_model = ""
 base_url = "http://127.0.0.1:8020/v1"   # （仅 index_translate）OpenAI 兼容端点
 model = "Index-Translate-2B"            # （仅 index_translate）模型名，与 llama-server --alias 一致
 style = ""                              # （仅 index_translate）风格软约束，如"保持口语化、自然的直播说话风格，使用女性口吻"
@@ -124,6 +121,10 @@ language = "JP"
 length = 1.0
 # 可选音色列表。-v 参数与 default_voice 从该列表匹配
 voices = ["Ling v2", "Fusetsu_v1.5"]
+
+[components]
+tool_enabled = true               # LLM 自主触发的 Tool 组件（sbv2_tts_tool）
+command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command）
 ```
 
 ### 配置字段说明
@@ -131,17 +132,15 @@ voices = ["Ling v2", "Fusetsu_v1.5"]
 | 段 | 字段 | 说明 |
 |---|---|---|
 | `[plugin]` | `enabled` | 是否启用插件（默认 `true`） |
-| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.2.0"`） |
-| `[general]` | `timeout` | 请求推理服务的超时时间（秒） |
+| `[plugin]` | `config_version` | 配置文件版本号，勿改（`"1.2.1"`） |
+| `[general]` | `timeout` | Style-Bert-VITS2 推理服务（`/voice`）请求超时（秒）；翻译请求超时见 `[translate].timeout` |
 | `[general]` | `max_text_length` | 译文长度上限（注入翻译 prompt，对齐服务端 `limit=100`；超长不再自动截断） |
 | `[general]` | `strip_voice_placeholder` | 剥离 replyer 回复正文中的 `[语音消息]` 占位回声，默认 `true` |
 | `[general]` | `send_error_messages` | 合成或翻译失败时是否回显错误文本 |
 | `[general]` | `echo_original_text` | **仅 @Tool**：发语音前回显一条整段中文原文（不分割、不回 planner；**默认关闭**，`translate_to_japanese=false` 时不生效） |
-| `[general]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true` |
-| `[general]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务（**仅 `host_llm` 引擎**） |
-| `[components]` | `tool_enabled` | 是否启用 `sbv2_tts_tool` Tool |
-| `[components]` | `command_enabled` | 是否启用 `/sbv2` Command |
+| `[translate]` | `translate_to_japanese` | 是否先翻译为日文再合成；建议保持 `true`（v1.2.1 自 `[general]` 迁入） |
 | `[translate]` | `engine` | 翻译引擎：`host_llm`（默认）/ `index_translate`；填错回落 `host_llm` |
+| `[translate]` | `translate_model` | 翻译用 LLM：任务名或具体模型名。留空 = `replyer` 任务（**仅 `host_llm` 引擎**；v1.2.1 自 `[general]` 迁入） |
 | `[translate]` | `base_url` | **仅 index_translate**：OpenAI 兼容端点，默认 `http://127.0.0.1:8020/v1` |
 | `[translate]` | `model` | **仅 index_translate**：模型名，与 llama-server `--alias` 一致，默认 `Index-Translate-2B` |
 | `[translate]` | `style` | **仅 index_translate**：风格软约束（prompt【注意】段），留空为无约束直译 |
@@ -255,7 +254,7 @@ ggsfly_sbv2-tts-CUDA-plugin/
 ├── plugin.py                # 插件入口（MaiBotPlugin + Tool / Command / Hook，内置配置模型）
 ├── translate.py             # 中译日翻译层（JPTranslator 宿主 LLM / IndexTranslateTranslator 本地服务双引擎）
 ├── README.md                # 插件使用文档
-├── LICENSE                  # GPL-3.0-or-later
+├── LICENSE                  # MIT
 ├── backends/                # 后端适配层
 │   ├── __init__.py
 │   ├── base.py              # TTSResult 与基类定义（base64 投递）

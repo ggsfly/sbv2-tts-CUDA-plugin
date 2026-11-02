@@ -23,11 +23,12 @@ class ConfigKeys:
     GENERAL_MAX_TEXT_LENGTH: Final[str] = "general.max_text_length"
     GENERAL_SEND_ERROR_MESSAGES: Final[str] = "general.send_error_messages"
     GENERAL_ECHO_ORIGINAL_TEXT: Final[str] = "general.echo_original_text"
-    GENERAL_TRANSLATE_TO_JAPANESE: Final[str] = "general.translate_to_japanese"
-    GENERAL_TRANSLATE_MODEL: Final[str] = "general.translate_model"
 
-    # ========== Translate 翻译引擎配置（v1.2.0）==========
+    # ========== Translate 翻译配置（v1.2.1 起翻译设置归拢本节）==========
+    TRANSLATE_TO_JAPANESE: Final[str] = "translate.translate_to_japanese"
     TRANSLATE_ENGINE: Final[str] = "translate.engine"
+    # 键名沿用 v1.1.x 的 translate_model（仅 host_llm 引擎）
+    TRANSLATE_TRANSLATE_MODEL: Final[str] = "translate.translate_model"
     TRANSLATE_BASE_URL: Final[str] = "translate.base_url"
     TRANSLATE_MODEL: Final[str] = "translate.model"
     TRANSLATE_STYLE: Final[str] = "translate.style"

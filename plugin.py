@@ -11,7 +11,7 @@
 
  管线（Tool 与 Command 共用，一次性整段合成单条语音）：
 1. 文本清理（去除首尾空白）
-2. 若 ``general.translate_to_japanese`` 开启，按 ``[translate].engine`` 选择
+2. 若 ``translate.translate_to_japanese`` 开启，按 ``[translate].engine`` 选择
    翻译引擎把整段中文译为日文（:class:`JPTranslator` 走宿主 LLM，或
    :class:`IndexTranslateTranslator` 走本地 Index-Translate OpenAI 兼容端点；
    翻译失败时 **绝不** 用中文喂推理服务，直接如实暴露错误）
@@ -88,7 +88,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.2.0", description="配置版本")
+    config_version: str = Field(default="1.2.1", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -98,7 +98,10 @@ class GeneralConfig(PluginConfigBase):
     __ui_icon__ = "settings"
     __ui_order__ = 1
 
-    timeout: int = Field(default=60, description="请求超时（秒）")
+    timeout: int = Field(
+        default=60,
+        description="Style-Bert-VITS2 推理服务（/voice）请求超时（秒）；翻译请求超时见 [translate].timeout",
+    )
     max_text_length: int = Field(
         default=100,
         description=(
@@ -130,27 +133,6 @@ class GeneralConfig(PluginConfigBase):
             ),
         },
     )
-    translate_to_japanese: bool = Field(
-        default=True,
-        description="是否先把中文翻译为日文再合成（Style-Bert-VITS2 为日文推理模型）",
-    )
-    translate_model: str = Field(
-        default="",
-        description=(
-            "（仅 translate.engine = host_llm 时生效）翻译用 LLM，支持两种填法："
-            "① 任务名（replyer / utils / planner / memory 等）；"
-            "② 模型名 / 模型标识符（model_config.toml 中 [[models]] 的 name 或 model_identifier）。"
-            "留空 = replyer 任务。命中任务名按任务调用；否则视为模型名直传 Host 解析，"
-            "模型无效时翻译失败如实暴露。"
-        ),
-        json_schema_extra={
-            "hint": (
-                "可填任务名（replyer/utils/planner 等）或模型名/标识符（如 "
-                "gemini-3.7-flash-low）。留空使用 replyer 任务。翻译是小任务，"
-                "推荐 utils 或快速小模型。"
-            ),
-        },
-    )
 
 
 class ComponentsConfig(PluginConfigBase):
@@ -158,7 +140,7 @@ class ComponentsConfig(PluginConfigBase):
 
     __ui_label__ = "组件"
     __ui_icon__ = "blocks"
-    __ui_order__ = 2
+    __ui_order__ = 4
 
     tool_enabled: bool = Field(default=True, description="是否启用 Tool 组件")
     command_enabled: bool = Field(default=True, description="是否启用 Command 组件")
@@ -185,16 +167,20 @@ class VoiceConfig(PluginConfigBase):
 
 
 class TranslateConfig(PluginConfigBase):
-    """翻译引擎配置（中→日，v1.2.0 起支持本地 Index-Translate 引擎）。"""
+    """翻译配置（中→日；v1.2.0 起支持本地 Index-Translate 引擎，v1.2.1 起归拢本节）。"""
 
     __ui_label__ = "翻译"
     __ui_icon__ = "languages"
-    __ui_order__ = 4
+    __ui_order__ = 2
 
+    translate_to_japanese: bool = Field(
+        default=True,
+        description="是否先把中文翻译为日文再合成（Style-Bert-VITS2 为日文推理模型）",
+    )
     engine: str = Field(
         default="host_llm",
         description=(
-            "翻译引擎：host_llm = 宿主 LLM（general.translate_model，消耗大模型 API）；"
+            "翻译引擎：host_llm = 宿主 LLM（translate_model，消耗大模型 API）；"
             "index_translate = 本地 Index-Translate 服务（OpenAI 兼容端点，"
             "需自行部署 llama-server，见 README）。填错时回落 host_llm。"
         ),
@@ -203,6 +189,23 @@ class TranslateConfig(PluginConfigBase):
                 "index_translate 引擎零 API 成本、延迟低（本机 2B 模型约 0.3~0.6 秒/条）；"
                 "base_url 指向 http://127.0.0.1:8020/v1（llama-server 默认端口 8020，"
                 "避开 MaiBot 消息服务器的 8000）。"
+            ),
+        },
+    )
+    translate_model: str = Field(
+        default="",
+        description=(
+            "（仅 engine = host_llm 时生效）翻译用 LLM，支持两种填法："
+            "① 任务名（replyer / utils / planner / memory 等）；"
+            "② 模型名 / 模型标识符（model_config.toml 中 [[models]] 的 name 或 model_identifier）。"
+            "留空 = replyer 任务。命中任务名按任务调用；否则视为模型名直传 Host 解析，"
+            "模型无效时翻译失败如实暴露。"
+        ),
+        json_schema_extra={
+            "hint": (
+                "可填任务名（replyer/utils/planner 等）或模型名/标识符（如 "
+                "gemini-3.7-flash-low）。留空使用 replyer 任务。翻译是小任务，"
+                "推荐 utils 或快速小模型。"
             ),
         },
     )
@@ -240,13 +243,17 @@ class TranslateConfig(PluginConfigBase):
 
 
 class SBV2TTSPluginConfig(PluginConfigBase):
-    """Style-Bert-VITS2 日文语音合成插件总配置。"""
+    """Style-Bert-VITS2 日文语音合成插件总配置。
+
+    节顺序对齐数据流：插件开关 → 通用 → 翻译 → 语音合成 → 组件开关
+    （同时决定 config.toml 生成顺序与 WebUI 显示顺序）。
+    """
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
-    components: ComponentsConfig = Field(default_factory=ComponentsConfig)
-    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     translate: TranslateConfig = Field(default_factory=TranslateConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    components: ComponentsConfig = Field(default_factory=ComponentsConfig)
 
 
 # ─── 插件主体 ────────────────────────────────────────────────────────────
@@ -564,7 +571,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
             - 翻译失败：``(False, error_detail)``——绝不返回原文
         """
 
-        if not self.config.general.translate_to_japanese:
+        if not self.config.translate.translate_to_japanese:
             return True, text
 
         if self._get_translate_engine() == "index_translate":
@@ -645,7 +652,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
             Tuple[str, str]: ``(task_name, model_name)``。
         """
 
-        raw = (self.config.general.translate_model or "").strip()
+        raw = (self.config.translate.translate_model or "").strip()
         if not raw:
             return "replyer", ""
 
@@ -700,7 +707,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
             voice: 音色档案。
             echo_enabled: 是否允许在语音前回显中文原文。仅 Tool 传 True；
                 实际是否回显还取决于 ``general.echo_original_text`` 与
-                ``general.translate_to_japanese``。
+                ``translate.translate_to_japanese``。
 
         Returns:
             :class:`TTSResult`。
@@ -738,7 +745,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         if (
             echo_enabled
             and self.config.general.echo_original_text
-            and self.config.general.translate_to_japanese
+            and self.config.translate.translate_to_japanese
         ):
             echo_text = self._build_echo_text(clean_text)
             if echo_text:

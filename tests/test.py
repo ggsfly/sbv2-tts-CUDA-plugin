@@ -439,6 +439,14 @@ class TestTranslateConfigDefaults:
     def test_engine_default_host_llm(self):
         assert TranslateConfig().engine == "host_llm"
 
+    def test_translate_to_japanese_default_on(self):
+        """v1.2.1 自 [general] 迁入，默认值保持 true。"""
+        assert TranslateConfig().translate_to_japanese is True
+
+    def test_translate_model_default_empty(self):
+        """v1.2.1 自 [general] 迁入，默认值保持留空 = replyer 任务。"""
+        assert TranslateConfig().translate_model == ""
+
     def test_base_url_default_uses_port_8020(self):
         """默认端口必须是 8020——8000 被 MaiBot 主消息服务器占用。"""
         assert TranslateConfig().base_url == "http://127.0.0.1:8020/v1"
@@ -524,7 +532,7 @@ class TestManifest:
         assert manifest["id"] == "ggsfly.sbv2-tts-cuda-plugin"
 
     def test_version_initial(self, manifest: dict):
-        assert manifest["version"] == "1.2.0"
+        assert manifest["version"] == "1.2.1"
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
@@ -558,7 +566,17 @@ class TestConfigDefaults:
         assert "max_text_length" in GeneralConfig.model_fields
 
     def test_config_version_bumped(self):
-        assert PluginSectionConfig().config_version == "1.2.0"
+        assert PluginSectionConfig().config_version == "1.2.1"
+
+    def test_translate_fields_moved_out_of_general(self):
+        """v1.2.1：翻译开关与 host_llm 模型选择归拢到 [translate] 节。"""
+        assert "translate_to_japanese" not in GeneralConfig.model_fields
+        assert "translate_model" not in GeneralConfig.model_fields
+
+    def test_section_order_follows_pipeline(self):
+        """v1.2.1：节顺序对齐数据流 通用→翻译→合成，组件开关殿后。"""
+        expected = ["plugin", "general", "translate", "voice", "components"]
+        assert list(plugin_mod.SBV2TTSPluginConfig.model_fields) == expected
 
 
 # ============================================================
@@ -606,7 +624,7 @@ class TestEchoScope:
         norm = " ".join(source.split())
         assert (
             "echo_enabled and self.config.general.echo_original_text "
-            "and self.config.general.translate_to_japanese"
+            "and self.config.translate.translate_to_japanese"
         ) in norm
         assert "sync_to_maisaka_history=False" in norm
 
