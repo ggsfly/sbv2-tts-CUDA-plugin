@@ -1122,6 +1122,16 @@ class TestCommandRoute:
             assert match is not None, text
             assert match.group("text")
 
+    def test_command_description_shows_trigger_not_component_name(self):
+        """面板只显示组件名与 description，description 必须给出真实触发方式。"""
+        metadata = _component_metadata("COMMAND")
+        description = metadata["description"]
+
+        assert "/sbv2" in description
+        assert "/voice" in description
+        # 组件名 sbv2_tts_command 不是可输入的命令，description 里要说明这一点
+        assert "内部组件名" in description
+
 
 def _component_metadata(component_type: str) -> Dict[str, Any]:
     """取指定类型组件的元数据。"""

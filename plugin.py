@@ -1091,7 +1091,10 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
     @Command(
         "sbv2_tts_command",
-        description="将文本转换为日文语音（Style-Bert-VITS2）",
+        description=(
+            "触发指令：/sbv2 <文本> [-v 音色] 或 /voice <文本> [-v 音色]；"
+            "/sbv2 help 查看用法。（sbv2_tts_command 是内部组件名，不是输入的命令）"
+        ),
         pattern=r"^/(?:sbv2|voice)\s+(?P<text>.+?)(?:\s+-v\s+(?P<voice>.+))?$",
         # 与扩展同一慢路径预算：翻译上限 30s + 合成默认 60s，宿主默认 60s 不够。
         timeout_ms=120000,
