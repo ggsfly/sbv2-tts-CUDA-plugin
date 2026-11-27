@@ -26,11 +26,12 @@ v1.2.0 起支持两种翻译引擎，由 ``[translate].engine`` 配置切换：
 新版 SDK 调取方式
 -----------------
 SDK 2.x 的 ``ctx.llm.generate`` 同时接受 ``task_name``（任务名）与
-``model_name``（具体模型名/标识符）。本模块把二者作为显式参数透传，
+``model_name``（具体模型名）。本模块把二者作为显式参数透传，
 上层负责解析配置后注入：
 
 - 留空 / 任务名 → 走任务路由；
-- 模型名 / model_identifier → 直传 Host 解析；模型无效时 Host 报错，
+- 模型名 → 直传 Host 解析（宿主按 ``[[models]].name`` 精确匹配，
+  不认 ``model_identifier``）；模型无效时 Host 报错，
   翻译失败如实暴露，**绝不静默回退到中文原文**。
 
 失败语义（重要）
@@ -107,7 +108,8 @@ class JPTranslator:
         :param llm_generate: 异步 LLM 调用回调，签名见模块顶部 ``LLMGenerate``。
         :param task_name: LLM 任务名（``replyer``/``utils`` 等）。留空使用
             ``replyer`` 任务。
-        :param model_name: 具体模型名 / model_identifier；非空时由 Host 直连该模型，
+        :param model_name: 具体模型名；非空时由 Host 直连该模型（宿主按
+            ``[[models]].name`` 精确匹配，不认 ``model_identifier``），
             无效时 Host 报错并经本方法暴露。
         :return: ``(success, payload)``：
             - 成功：``(True, 译文.strip())``

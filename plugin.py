@@ -26,7 +26,7 @@ LLM 调取规范
 遵循 MaiBot SDK 2.x 规范，不导入 ``src.*``，统一使用 ``ctx.llm.generate``：
 - 留空 → ``task_name="replyer"``
 - 命中可用任务名 → ``task_name=<值>``
-- 否则视为模型名/标识符 → ``task_name="replyer", model_name=<值>`` 直传 Host
+- 否则视为模型名 → ``task_name="replyer", model_name=<值>`` 直传 Host
   解析；模型无效时 Host 报错，翻译失败如实暴露（不静默回退）。
 """
 
@@ -196,15 +196,16 @@ class TranslateConfig(PluginConfigBase):
         description=(
             "（仅 engine = host_llm 时生效）翻译用 LLM，支持两种填法："
             "① 任务名（replyer / utils / planner / memory 等）；"
-            "② 模型名 / 模型标识符（model_config.toml 中 [[models]] 的 name 或 model_identifier）。"
+            "② 模型名（model_config.toml 中 [[models]] 的 name，须与 name 完全一致；"
+            "宿主按 name 精确匹配，不认 model_identifier）。"
             "留空 = replyer 任务。命中任务名按任务调用；否则视为模型名直传 Host 解析，"
             "模型无效时翻译失败如实暴露。"
         ),
         json_schema_extra={
             "hint": (
-                "可填任务名（replyer/utils/planner 等）或模型名/标识符（如 "
-                "gemini-3.7-flash-low）。留空使用 replyer 任务。翻译是小任务，"
-                "推荐 utils 或快速小模型。"
+                "可填任务名（replyer/utils/planner 等）或模型的 name（如 "
+                "gemini-3.7-flash-low，须与 model_config.toml 里 [[models]].name 一模一样）。"
+                "留空使用 replyer 任务。翻译是小任务，推荐 utils 或快速小模型。"
             ),
         },
     )
@@ -668,7 +669,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         规则：
         - 留空 → ``("replyer", "")``，默认使用 replyer 任务。
         - 命中已注册任务名 → ``(值, "")``，按任务路由。
-        - 否则视为模型名/标识符 → ``("replyer", 值)``，直传 Host 解析；
+        - 否则视为模型名 → ``("replyer", 值)``，直传 Host 解析；
           模型无效时 Host 报错，翻译失败如实暴露，**不静默回退**。
 
         Returns:
@@ -699,7 +700,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         if raw in self._available_task_names:
             return raw, ""
 
-        # 视为模型名/标识符，直传 Host 解析；无效即报错暴露
+        # 视为模型名，直传 Host 解析；无效即报错暴露
         self.ctx.logger.info(
             "translate_model `%s` 未命中任务名，将作为模型名直传 Host", raw,
         )

@@ -115,7 +115,7 @@ translate_to_japanese = true      # 是否先把文本翻译为日文再合成
 engine = "host_llm"
 # （仅 engine = host_llm）翻译用 LLM。支持两种填法：
 #   1) 任务名：replyer / utils / planner / memory 等
-#   2) 模型名 / 模型标识符：model_config.toml 中 [[models]] 的 name 或 model_identifier
+#   2) 模型名：model_config.toml 中 [[models]] 的 name（须完全一致，宿主按 name 精确匹配，不认 model_identifier）
 # 留空 = replyer 任务。无效模型直传 Host 解析，报错即时暴露。
 translate_model = ""
 base_url = "http://127.0.0.1:8020/v1"   # （仅 index_translate）OpenAI 兼容端点
@@ -220,7 +220,7 @@ command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command
 | `send.custom` | 核心语音投递能力：用于向聊天流投递 `voice` 类型 Base64 音频消息 |
 | `send.text` | 文本投递：用于命令帮助、未知音色/合成失败提示，以及 `echo_original_text` 开启时在语音前回显中文原文（不回 planner） |
 | `llm.generate` | 中译日核心能力：在合成前将中文文本翻译为自然日文（支持直选模型与任务分发） |
-| `llm.get_available_models` | 任务名动态校验：用于识别 `translate_model` 所填项是模型任务名还是具体模型标识符 |
+| `llm.get_available_models` | 任务名动态校验：用于识别 `translate_model` 所填项是任务名还是具体模型名 |
 | `component.disable` | 组件动态管理：在插件加载时根据配置的 `tool_enabled` / `command_enabled` 开关按需禁用对应组件 |
 
 ---
