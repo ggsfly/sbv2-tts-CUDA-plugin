@@ -552,7 +552,15 @@ class TestManifest:
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
-        required = {"send.custom", "send.text", "llm.generate", "llm.get_available_models", "component.disable"}
+        required = {
+            "send.custom",
+            "send.text",
+            "llm.generate",
+            "llm.get_available_models",
+            # 宿主按声明逐项授权组件开关，enable/disable 是两个 capability，缺一即被拒。
+            "component.enable",
+            "component.disable",
+        }
         assert required.issubset(caps), f"缺少能力: {required - caps}"
 
     def test_dependencies_include_aiohttp(self, manifest: dict):

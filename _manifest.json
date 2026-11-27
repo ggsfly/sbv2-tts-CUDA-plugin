@@ -42,6 +42,7 @@
     "send.text",
     "llm.generate",
     "llm.get_available_models",
+    "component.enable",
     "component.disable"
   ],
   "i18n": {
