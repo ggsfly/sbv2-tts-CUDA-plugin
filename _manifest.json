@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.2.2",
+  "version": "1.3.0",
   "name": "Style-Bert-VITS2 日文语音合成插件 (CUDA)",
   "description": "调用本地 Style-Bert-VITS2 (CUDA) 推理服务合成日文语音的 TTS 插件",
   "plugin_type": "media",
@@ -23,11 +23,11 @@
     "issues": "https://github.com/ggsfly/sbv2-tts-cuda-plugin/issues"
   },
   "host_application": {
-    "min_version": "1.2.5",
+    "min_version": "1.4.8",
     "max_version": "1.4.99"
   },
   "sdk": {
-    "min_version": "2.8.1",
+    "min_version": "2.23.0",
     "max_version": "2.23.99"
   },
   "dependencies": [

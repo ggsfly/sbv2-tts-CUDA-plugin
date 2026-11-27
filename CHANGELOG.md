@@ -1,5 +1,24 @@
 # 更新日志
 
+## v1.3.0
+
+### 主要功能
+
+- **[reply] 自动回复改走 ReplyExtension**：planner 在 `reply` 的 `plugin_options` 里选中 `sbv2_ja_voice` 时，本条回复正文照常发送，同时把正文译为日文并合成一条语音追加在其后（正文即字幕）。
+
+### 细节
+
+- **[tool] 删除 `sbv2_tts_tool`** 及其 handler、Tool 可见性声明与 `Tool` 导入；组件集合变为 `REPLY_EXTENSION`（`sbv2_ja_voice`）+ `COMMAND`（`sbv2_tts_command`）+ 既有 `HOOK_HANDLER`（`sbv2_strip_voice_placeholder`）。
+- **[config] 删除 `general.echo_original_text`**（正文已承担字幕职责）与 `components.tool_enabled`；新增 `components.extension_enabled`（默认 `true`），关闭时扩展仍注册、由 `component.disable` 禁用。
+- **[config] `config_version` 升至 `"1.3.0"`**；删除废弃配置键常量 `GENERAL_ECHO_ORIGINAL_TEXT` / `COMPONENTS_TOOL_ENABLED`；旧 `tool_enabled=false` 不迁移（宿主按新骨架重建，新键按默认值补齐）。
+- **[backend] 合成与投递拆分**：新增 `VoiceBackend.synthesize()` 只请求 `/voice` 并校验响应、返回 WAV，不投递；`execute()` 改为「合成 → 用同一已解析音色投递一次」，投递阶段的超时/网络异常仍映射为原有的超时与网络错误文案。
+- **[translate] 翻译入口分离**：新增 `_translate_by_engine()`（无视 `translate_to_japanese`，纯按 `[translate].engine` 路由），供扩展使用；`_translate_text()` 保留免翻译语义并委托它。`translate_to_japanese` 语义因此收窄为「命令路线是否免翻译」。
+- **[llm] 空任务表不缓存**：`get_available_models()` 返回 `[]` 时不再写入 `frozenset()`，保持未缓存并在下次调用重试，当次按模型名直传。
+- **[component] 组件同步改用扩展类型**：`_sync_component_switches` 对 `ggsfly.sbv2-tts-cuda-plugin.sbv2_ja_voice` 使用 `REPLY_EXTENSION`；命令开关逻辑不变。
+- **[compat] 兼容性下限收紧**：`host_application` → `1.4.8` ~ `1.4.99`，`sdk` → `2.23.0` ~ `2.23.99`（ReplyExtension 路线的最低可用版本）。
+- **[docs] README 重写两条路线**：命令与自动回复分开说明，补 `plugin_options` 可复制示例与带 `chat_anlyze` 的完整示例，写明「语音按需」「不要同时选 `attach_voice`（两者同用会导致整条回复发送前失败）」「扩展朗读的是后处理前正文」。
+- **[test] 补回归断言**：后端零投递 vs 投递一次、命令失败四类文案与投递次数精确回归、翻译关闭语义、扩展成功/失败四类与取消传播、空任务表恢复、配置重建、组件元数据与开关。
+
 ## v1.2.2
 
 适配 MaiBot 1.4.8 / maibot-sdk 2.23.0。

@@ -22,7 +22,6 @@ class ConfigKeys:
     GENERAL_TIMEOUT: Final[str] = "general.timeout"
     GENERAL_MAX_TEXT_LENGTH: Final[str] = "general.max_text_length"
     GENERAL_SEND_ERROR_MESSAGES: Final[str] = "general.send_error_messages"
-    GENERAL_ECHO_ORIGINAL_TEXT: Final[str] = "general.echo_original_text"
 
     # ========== Translate 翻译配置（v1.2.1 起翻译设置归拢本节）==========
     TRANSLATE_TO_JAPANESE: Final[str] = "translate.translate_to_japanese"
@@ -37,7 +36,8 @@ class ConfigKeys:
     TRANSLATE_MAX_TOKENS: Final[str] = "translate.max_tokens"
 
     # ========== Components 组件配置 ==========
-    COMPONENTS_TOOL_ENABLED: Final[str] = "components.tool_enabled"
+    # components.extension_enabled 走强类型读取（self.config.components.extension_enabled），
+    # 不在此声明扁平键
     COMPONENTS_COMMAND_ENABLED: Final[str] = "components.command_enabled"
 
     # ========== Voice 推理服务配置 ==========

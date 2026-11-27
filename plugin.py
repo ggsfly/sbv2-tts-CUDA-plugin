@@ -1,25 +1,31 @@
 """Style-Bert-VITS2 (CUDA) 日文语音合成插件。
 
 本插件调用本地 Style-Bert-VITS2 (CUDA) 推理服务合成日文语音。Style-Bert-VITS2
-是日文推理模型，因此插件先调用 LLM 把用户输入翻译为自然日文，再送入本地
-推理服务合成。
+是日文推理模型，因此插件先把文本翻译为自然日文，再送入本地推理服务合成。
 
 触发面：
-- ``@Tool``：由 LLM 自主决定调用，对应 ``sbv2_tts_tool`` 组件；
+- ``@ReplyExtension``：planner 在 ``reply`` 的 ``plugin_options`` 里选中
+  ``sbv2_ja_voice`` 时触发，对应 ``sbv2_ja_voice`` 组件。扩展在 ``before_send``
+  把本条回复正文译为日文、合成一条语音，**保留全部已有消息**并在末尾追加一条
+  ``voice`` 段，由宿主统一发送（正文即字幕）；
 - ``@Command``：由用户通过 ``/sbv2`` / ``/voice`` 命令触发，对应
   ``sbv2_tts_command`` 组件。
 
- 管线（Tool 与 Command 共用，一次性整段合成单条语音）：
+命令管线（一次性整段合成单条语音，插件自己投递）：
 1. 文本清理（去除首尾空白）
 2. 若 ``translate.translate_to_japanese`` 开启，按 ``[translate].engine`` 选择
    翻译引擎把整段中文译为日文（:class:`JPTranslator` 走宿主 LLM，或
    :class:`IndexTranslateTranslator` 走本地 Index-Translate OpenAI 兼容端点；
    翻译失败时 **绝不** 用中文喂推理服务，直接如实暴露错误）
-3. 【仅 Tool】若 ``general.echo_original_text`` 开启，在投递语音前用
-   ``ctx.send.text`` 回显一条整段中文原文，且 ``sync_to_maisaka_history=False``
-   不写 maisaka 历史（不返回 planner）
-4. 调用 :class:`VoiceBackend` 合成唯一一条语音，并通过
+3. 调用 :class:`VoiceBackend` 合成唯一一条语音，并通过
    ``ctx.send.custom("voice", base64)`` 投递到聊天流
+
+自动回复管线（ReplyExtension，仅在 planner 选中本扩展时运行）：
+1. 把 ``before_send`` 收到的回复正文交给中译日引擎（不看
+   ``translate.translate_to_japanese``，日文是硬约束）
+2. :meth:`VoiceBackend.synthesize` 只合成不投递，把 WAV 编码为 base64 后作为
+   一条追加消息返回，由宿主在正文之后发送
+3. 任一步失败只向当前聊天发一条提示并返回 ``{}``，宿主原样发送正文（无语音）
 
 LLM 调取规范
 ------------
@@ -30,22 +36,30 @@ LLM 调取规范
   解析；模型无效时 Host 报错，翻译失败如实暴露（不静默回退）。
 """
 
+from functools import partial
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, cast
 
-import aiohttp
 import asyncio
 import logging
 import re
 import sys
 
-from functools import partial
-
-from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk import (
+    Command,
+    Field,
+    HookHandler,
+    MaiBotPlugin,
+    PluginConfigBase,
+    ReplyExtension,
+)
 from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
+
+import aiohttp
 
 from .backends import TTSBackendRegistry, VoiceBackend, VoiceProfile
 from .backends.base import TTSResult
 from .translate import IndexTranslateTranslator, JPTranslator
+from .utils.file import TTSFileManager
 from .utils.session import TTSSessionManager
 from .utils.text import TTSTextUtils
 
@@ -88,7 +102,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.2.1", description="配置版本")
+    config_version: str = Field(default="1.3.0", description="配置版本")
 
 
 class GeneralConfig(PluginConfigBase):
@@ -119,20 +133,6 @@ class GeneralConfig(PluginConfigBase):
         ),
     )
     send_error_messages: bool = Field(default=True, description="是否向聊天流回显错误提示")
-    echo_original_text: bool = Field(
-        default=False,
-        description=(
-            "（仅 @Tool 自动触发）发送日文语音前，先回显一条中文原文，"
-            "便于听不懂日文语音的成员阅读。整段一条、不写入 maisaka 历史（不返回 planner）。"
-            "默认关闭；translate_to_japanese=false 时不生效。"
-        ),
-        json_schema_extra={
-            "hint": (
-                "只在 planner 自主调用 sbv2_tts_tool 发语音时生效；@Command(/sbv2) 手动命令不回显。"
-                "回显为整段中文原文一条，且 sync_to_maisaka_history=False。"
-            ),
-        },
-    )
 
 
 class ComponentsConfig(PluginConfigBase):
@@ -142,7 +142,13 @@ class ComponentsConfig(PluginConfigBase):
     __ui_icon__ = "blocks"
     __ui_order__ = 4
 
-    tool_enabled: bool = Field(default=True, description="是否启用 Tool 组件")
+    extension_enabled: bool = Field(
+        default=True,
+        description=(
+            "是否允许 planner 在 reply 的 plugin_options 里选择 sbv2_ja_voice 扩展。"
+            "关闭后扩展仍注册，但被禁用，模型看不到该选项；/sbv2 命令不受影响。"
+        ),
+    )
     command_enabled: bool = Field(default=True, description="是否启用 Command 组件")
 
 
@@ -174,7 +180,10 @@ class TranslateConfig(PluginConfigBase):
 
     translate_to_japanese: bool = Field(
         default=True,
-        description="是否先把中文翻译为日文再合成（Style-Bert-VITS2 为日文推理模型）",
+        description=(
+            "命令路线是否免翻译：关闭后 /sbv2 把清理后的原文直接交给 language=JP 的后端合成；"
+            "自动回复的日语语音扩展始终走中译日引擎，不受本开关影响"
+        ),
     )
     engine: Literal["host_llm", "index_translate"] = Field(
         default="host_llm",
@@ -262,8 +271,9 @@ class SBV2TTSPluginConfig(PluginConfigBase):
 class SBV2TTSPlugin(MaiBotPlugin):
     """Style-Bert-VITS2 (CUDA) 日文语音合成插件（MaiBot SDK 2.x 版）。
 
-    由 Tool / Command 共同驱动 Style-Bert-VITS2 服务的 ``/voice`` 接口，
-    每条输入一次性整段合成、投递唯一一条语音到当前聊天流。
+    由 ReplyExtension / Command 驱动 Style-Bert-VITS2 服务的 ``/voice`` 接口：
+    命令路线每条输入一次性整段合成、由插件投递唯一一条语音；自动回复路线把
+    回复正文译为日文后追加一条语音，交由宿主随正文一起发送。
     """
 
     config_model = SBV2TTSPluginConfig
@@ -290,7 +300,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         1. 短超时探测 Style-Bert-VITS2 服务存活（GET /models/info）。
         2. 若翻译引擎为 index_translate，短超时探测其 OpenAI 兼容端点
            （GET {base_url}/models）。
-        3. 按 ``[components]`` 配置同步 Tool / Command 组件开关。
+        3. 按 ``[components]`` 配置同步 ReplyExtension / Command 组件开关。
         4. 不阻断插件加载：未连通只发 warning。
         """
 
@@ -327,14 +337,16 @@ class SBV2TTSPlugin(MaiBotPlugin):
         await self._sync_component_switches()
 
     async def _sync_component_switches(self) -> None:
-        """按 ``[components]`` 配置启用/禁用 Tool 与 Command 组件。
+        """按 ``[components]`` 配置启用/禁用 ReplyExtension 与 Command 组件。
 
-        组件用 ``plugin_id.component_name`` 完全限定名定位，避免与其他插件重名；
+        两组件都用 ``plugin_id.component_name`` 完全限定名定位，避免与其他插件重名；
         宿主返回 ``{"success": bool, "error": str}``，失败时如实记录，不假装已生效。
+        扩展开关关闭时仍然注册扩展，只是通过 ``component.disable`` 禁用——
+        模型在 ``reply.plugin_options`` 里看不到它，等价于关闭自动语音。
         """
 
         switches: Tuple[Tuple[str, str, bool], ...] = (
-            ("sbv2_tts_tool", "TOOL", self.config.components.tool_enabled),
+            ("sbv2_ja_voice", "REPLY_EXTENSION", self.config.components.extension_enabled),
             ("sbv2_tts_command", "COMMAND", self.config.components.command_enabled),
         )
 
@@ -372,9 +384,10 @@ class SBV2TTSPlugin(MaiBotPlugin):
     ) -> Dict[str, Any]:
         """剥离 replyer 正文中的 [语音消息] 占位回声。
 
-        本插件发送语音后，聊天历史会把该语音渲染为占位文本，replyer 在
+        本插件投递语音后，聊天历史会把该语音渲染为占位文本，replyer 在
         同一轮生成文字回复时可能把占位模仿进正文开头，从而
         产生一条只含"[语音消息]"的引用消息。此钩子在文本后处理前把它剥掉。
+        本钩子在回复扩展之前执行，不处理扩展在正文之后追加的那条语音。
 
         Args:
             response: 即将执行后处理的回复正文。
@@ -399,7 +412,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         if cleaned == response:
             return {"action": "continue"}
         if not cleaned:
-            # 整条回复只有占位回声：如实暴露为空正文（语音已由工具发出），
+            # 整条回复只有占位回声：如实暴露为空正文，
             # 由 Host 走"生成可见回复失败"分支，不静默保留占位。
             self.ctx.logger.info("回复正文仅含 [语音消息] 占位回声，已剥离为空")
             return {"action": "continue", "modified_kwargs": {**kwargs, "response": ""}}
@@ -499,7 +512,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         投到当前聊天流。
 
         Args:
-            stream_id: 当前聊天流 ID，由 Tool / Command handler 注入。
+            stream_id: 当前聊天流 ID，由命令 handler 注入。
 
         Returns:
             Callable[..., Any]: 与 :class:`TTSBackendBase._send_custom` 兼容的闭包。
@@ -529,6 +542,9 @@ class SBV2TTSPlugin(MaiBotPlugin):
     ) -> Any:
         """创建 Voice 后端实例并注入 ``send_custom`` 闭包。
 
+        命令路线用 :meth:`VoiceBackend.execute` 直接投递；自动回复路线只调
+        :meth:`VoiceBackend.synthesize` 取音频，闭包不会被触发。
+
         Args:
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
@@ -542,8 +558,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         )
         if backend is None:
             return None
-        if hasattr(backend, "set_send_custom"):
-            backend.set_send_custom(self._make_send_custom(stream_id))
+        backend.set_send_custom(self._make_send_custom(stream_id))
         return backend
 
     async def _execute_backend(
@@ -581,7 +596,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         text: str,
         log_prefix: str,
     ) -> Tuple[bool, str]:
-        """根据配置决定是否翻译为日文，并按 ``[translate].engine`` 路由引擎。
+        """命令路线翻译入口：``translate_to_japanese`` 关闭时免翻译。
 
         Args:
             text: 待翻译中文文本（已清理非空）。
@@ -589,13 +604,32 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
         Returns:
             ``(success, payload)``：
-            - 不需要翻译时：``(True, 原文本)``
+            - 开关关闭时：``(True, 原文本)``
             - 翻译成功：``(True, 译文)``
             - 翻译失败：``(False, error_detail)``——绝不返回原文
         """
 
         if not self.config.translate.translate_to_japanese:
             return True, text
+
+        return await self._translate_by_engine(text, log_prefix)
+
+    async def _translate_by_engine(
+        self,
+        text: str,
+        log_prefix: str,
+    ) -> Tuple[bool, str]:
+        """按 ``[translate].engine`` 路由翻译引擎，无视免翻译开关。
+
+        自动回复的日语语音扩展走本入口：日文是硬约束，失败也不回退原文。
+
+        Args:
+            text: 待翻译中文文本（已清理非空）。
+            log_prefix: 日志前缀。
+
+        Returns:
+            ``(success, payload)``，失败时绝不返回原文。
+        """
 
         # engine 为 Literal 校验字段，非法值在加载时即报错，此处无需兜底
         if self.config.translate.engine == "index_translate":
@@ -671,6 +705,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         - 命中已注册任务名 → ``(值, "")``，按任务路由。
         - 否则视为模型名 → ``("replyer", 值)``，直传 Host 解析；
           模型无效时 Host 报错，翻译失败如实暴露，**不静默回退**。
+        - 任务表拉取失败或为空 → 本次按模型名直传，且不写缓存（下次重试）。
 
         Returns:
             Tuple[str, str]: ``(task_name, model_name)``。
@@ -690,9 +725,17 @@ class SBV2TTSPlugin(MaiBotPlugin):
                     exc,
                 )
                 return "replyer", raw
-            self._available_task_names = frozenset(
+            task_names = frozenset(
                 str(n).strip() for n in names if str(n).strip()
             )
+            # 空列表说明宿主没给出可用任务表（SDK 会把失败形状塌缩成 []），
+            # 一并保持未缓存，下次重试，避免把空集合钉死成「无任务名」。
+            if not task_names:
+                self.ctx.logger.warning(
+                    "未取得可用 LLM 任务列表，translate_model 本次按模型名直传 Host",
+                )
+                return "replyer", raw
+            self._available_task_names = task_names
             self.ctx.logger.debug(
                 "已缓存可用 LLM 任务名: %s", sorted(self._available_task_names),
             )
@@ -714,24 +757,20 @@ class SBV2TTSPlugin(MaiBotPlugin):
         stream_id: str,
         log_prefix: str,
         voice: Optional[VoiceProfile],
-        echo_enabled: bool = False,
     ) -> TTSResult:
-        """翻译-合成管线的共享实现（一次性整段合成单条语音）。
+        """命令路线的翻译-合成管线（一次性整段合成单条语音）。
 
         步骤：
         1. 文本清理
-        2. 整段翻译为日文（若开启）；失败即如实暴露并返回，不分段、不回退原文
-        3. 【仅 Tool 且配置开启】语音前回显整段中文原文（不回 planner）
-        4. 合成并投递唯一一条语音
+        2. 整段翻译为日文（``translate_to_japanese`` 开启时）；失败即如实暴露并
+           返回，不分段、不回退原文
+        3. 合成并投递唯一一条语音
 
         Args:
             raw_text: 原始输入文本。
             stream_id: 当前聊天流 ID。
             log_prefix: 日志前缀。
             voice: 音色档案。
-            echo_enabled: 是否允许在语音前回显中文原文。仅 Tool 传 True；
-                实际是否回显还取决于 ``general.echo_original_text`` 与
-                ``translate.translate_to_japanese``。
 
         Returns:
             :class:`TTSResult`。
@@ -765,22 +804,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 backend_name=_BACKEND_NAME,
             )
 
-        # 3. 【仅 Tool】语音前回显整段中文原文（不回 planner）
-        if (
-            echo_enabled
-            and self.config.general.echo_original_text
-            and self.config.translate.translate_to_japanese
-        ):
-            echo_text = self._build_echo_text(clean_text)
-            if echo_text:
-                await self.ctx.send.text(
-                    echo_text, stream_id, sync_to_maisaka_history=False,
-                )
-                self.ctx.logger.info(
-                    "%s 已在语音前回显中文原文（不回 planner）", log_prefix,
-                )
-
-        # 4. 一次性合成并投递唯一一条语音
+        # 3. 一次性合成并投递唯一一条语音
         result = await self._execute_backend(
             payload, stream_id, log_prefix, voice=voice,
         )
@@ -790,108 +814,173 @@ class SBV2TTSPlugin(MaiBotPlugin):
             )
         return result
 
-    # ─── Tool: 由 LLM 自主触发 ───────────────────────────────────────────
+    # ─── ReplyExtension: planner 选中本条要走日语语音时触发 ─────────────
 
-    @Tool(
-        "sbv2_tts_tool",
+    @ReplyExtension(
+        "sbv2_ja_voice",
         description=(
-            "用日文语音回复（Style-Bert-VITS2 日文 TTS）：先调用 LLM 把中文译为日文，"
-            "再调用本地 Style-Bert-VITS2 服务合成日文语音发送。"
+            "仅本条需要日语语音时选择。选中后本条回复正文会被朗读为日语语音——"
+            "需要更短的台词时请把 reply_style 设为「简短表达」。"
+            "省略 voice 使用默认音色；不要同时选择 attach_voice。"
         ),
         parameters=[
             ToolParameterInfo(
-                name="text",
-                param_type=ToolParamType.STRING,
-                description="要转为日文语音的中文文本（必填）",
-                required=True,
-            ),
-            ToolParameterInfo(
                 name="voice",
                 param_type=ToolParamType.STRING,
-                description="音色名，如 'Ling v2' 或 'Fusetsu_v1.5'，默认 'Ling v2'",
+                description="音色名，如 'Ling v2'；省略用默认音色",
                 required=False,
-                default="Ling v2",
             ),
         ],
-        # 宿主 1.4.x 的 reasoning planner 只把 visibility=visible 的插件工具放进原生
-        # tools 数组；未声明时默认 deferred，只能经 tool_search 发现且参数 schema 不出站，
-        # 实测表现为 planner 永远调不动本工具（指令 /sbv2 走 Command 链路，不受影响）。
-        visibility="visible",
-        # 宿主组件 RPC 默认 60s，而本插件最慢合法路径是「翻译 30s(index_translate
-        # 单次超时上限) + 合成 60s(general.timeout 默认值)」，必须放宽到覆盖两者。
+        generation_prompt="仅当本轮需要日语音频时，请用自然、简洁的中文口语书写回复正文。",
+        # 宿主组件 RPC 默认 60s，本扩展最慢合法路径是「翻译 30s + 合成 60s」，放宽覆盖两者。
         timeout_ms=120000,
     )
-    async def handle_tts_tool(
+    async def ja_voice(
         self,
-        text: str = "",
-        voice: str = "",
-        stream_id: str = "",
+        *,
+        phase: str,
+        text: str,
+        messages: List[Dict[str, Any]],
+        parameters: Dict[str, Any],
+        chat: Dict[str, Any],
+        reply_id: str,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """处理 LLM 自主调用的 TTS Tool。
+        """把本条回复正文译为日文并追加一条语音消息。
 
         Args:
-            text: 要转为日文语音的中文文本。
-            voice: 音色名；空串则用配置中的默认音色。
-            stream_id: 当前聊天流 ID（Host 注入）。
-            **kwargs: 兼容其它 Host 注入字段。
+            phase: ``prepare`` / ``before_send``；只有 ``before_send`` 产出语音。
+            text: 回复正文（已过 ``before_post_process``，即待朗读的中文原文）。
+            messages: 宿主待发送的整组消息（每项含 segments / quote_previous）。
+            parameters: 经 ``prepare`` 校验后的扩展参数（可含 voice）。
+            chat: ``ToolAvailabilityContext`` 的字典形式（platform / stream_id 等）。
+            reply_id: 本次 reply 的标识，用于日志。
+            **kwargs: 宿主注入的其余调用字段（call_id / session_id 等）。
 
         Returns:
-            Dict[str, Any]: ``{"success": bool, "content": str}``——`content` 是给模型
-            阅读的结果文字（宿主 `component_query.py:657` 优先读 `content`，
-            `success=False` 时同时作为错误信息）。
+            Dict[str, Any]: 成功时 ``{"messages": [*原消息, 一条 voice 消息]}``；
+            其余情况返回 ``{}``（不改动宿主待发送的消息组）。
         """
 
         del kwargs
-        log_prefix = f"[sbv2_tts_plugin][tool][{stream_id}]"
+        log_prefix = f"[sbv2_tts_plugin][extension][{reply_id}]"
 
-        if not stream_id:
-            return {"success": False, "content": "缺少 stream_id，无法发送"}
+        if phase != "before_send":
+            return {}
+        # CLI 只渲染文本、不播音频，不做无效合成。
+        if chat.get("platform") == "maisaka_cli":
+            return {}
 
+        clean_text = TTSTextUtils.clean_text(text)
+        if not clean_text:
+            await self._notify_extension_failure(
+                chat, log_prefix, "正文为空",
+            )
+            return {}
+
+        voice_name = str(parameters.get("voice") or "")
         try:
-            profile = self._resolve_voice(voice)
+            profile = self._resolve_voice(voice_name)
         except ValueError as exc:
-            if self.config.general.send_error_messages:
-                await self.ctx.send.text(str(exc), stream_id)
-            return {"success": False, "content": str(exc)}
+            self.ctx.logger.error("%s 音色解析失败: %s", log_prefix, exc)
+            attempted = voice_name or self.config.voice.default_voice
+            await self._notify_extension_failure(
+                chat, log_prefix, f"未知音色「{attempted}」",
+            )
+            return {}
 
+        ok, payload = await self._translate_by_engine(clean_text, log_prefix)
+        if not ok:
+            self.ctx.logger.error(
+                "%s 日文翻译失败: %s", log_prefix, payload,
+            )
+            await self._notify_extension_failure(
+                chat, log_prefix, "日文翻译失败",
+            )
+            return {}
+
+        backend = self._create_backend(str(chat.get("stream_id") or ""), log_prefix)
+        if backend is None:
+            await self._notify_extension_failure(
+                chat, log_prefix, f"合成失败（未注册的 TTS 后端: {_BACKEND_NAME}）",
+            )
+            return {}
+
+        wav, error_message = await backend.synthesize(payload, profile)
+        if wav is None:
+            self.ctx.logger.error(
+                "%s 语音合成失败: %s", log_prefix, error_message,
+            )
+            await self._notify_extension_failure(
+                chat, log_prefix, f"合成失败（{error_message}）",
+            )
+            return {}
+
+        # base64 编码随 WAV 体积增长，放到线程里，避免占用事件循环。
+        b64 = await asyncio.to_thread(TTSFileManager.audio_to_base64, wav)
+        if not b64:
+            await self._notify_extension_failure(
+                chat, log_prefix, "合成失败（音频数据转 base64 失败）",
+            )
+            return {}
+
+        self.ctx.logger.info(
+            "%s 已追加日语语音（音色=%s，音频=%d字节）",
+            log_prefix, profile.name, len(wav),
+        )
+        return {
+            "messages": [
+                *messages,
+                {
+                    "segments": [
+                        {"type": "voice", "data": "", "binary_data_base64": b64},
+                    ],
+                    "quote_previous": False,
+                },
+            ],
+        }
+
+    async def _notify_extension_failure(
+        self,
+        chat: Dict[str, Any],
+        log_prefix: str,
+        reason: str,
+    ) -> None:
+        """扩展失败通知出口：向当前聊天发一条提示，不改动宿主待发送的消息组。
+
+        不受 ``general.send_error_messages`` 影响（该字段只控制命令路线）。
+        平台没给 ``stream_id`` 时只记日志；通知返回 False 或抛异常也只记日志。
+
+        Args:
+            chat: ``ToolAvailabilityContext`` 的字典形式。
+            log_prefix: 日志前缀（含 ``reply_id``）。
+            reason: 失败原因文案，拼进固定提示。
+        """
+
+        stream_id = str(chat.get("stream_id") or "")
+        notify_text = f"本次未附加日语语音：{reason}。"
+        if not stream_id:
+            self.ctx.logger.warning(
+                "%s 缺少 stream_id，跳过失败通知: %s", log_prefix, notify_text,
+            )
+            return
         try:
-            result = await self._run_pipeline(
-                raw_text=text,
-                stream_id=stream_id,
-                log_prefix=log_prefix,
-                voice=profile,
-                echo_enabled=True,
+            sent = await self.ctx.send.text(
+                notify_text,
+                stream_id,
+                sync_to_maisaka_history=False,
+                storage_message=False,
             )
-            return {"success": result.success, "content": result.message}
-        except asyncio.TimeoutError:
-            timeout_sec = self.config.general.timeout
+        except Exception as exc:
+            # 错误通知先于正文发出；这里失败不能阻断宿主发送正文。
             self.ctx.logger.error(
-                "%s TTS Tool 超时（%ss）", log_prefix, timeout_sec,
+                "%s 失败通知发送异常: %s", log_prefix, exc,
             )
-            if self.config.general.send_error_messages:
-                await self.ctx.send.text(
-                    f"语音合成超时（{timeout_sec}s）", stream_id,
-                )
-            return {"success": False, "content": "timeout"}
-        except (aiohttp.ClientError, ConnectionError) as exc:
+            return
+        if not sent:
             self.ctx.logger.error(
-                "%s TTS Tool 网络错误: %s", log_prefix, exc,
+                "%s 失败通知发送未成功: %s", log_prefix, notify_text,
             )
-            if self.config.general.send_error_messages:
-                await self.ctx.send.text(
-                    f"语音合成网络错误: {type(exc).__name__}", stream_id,
-                )
-            return {"success": False, "content": str(exc)}
-        except (KeyError, AttributeError, ValueError) as exc:
-            self.ctx.logger.error(
-                "%s TTS Tool 参数错误: %s", log_prefix, exc, exc_info=True,
-            )
-            if self.config.general.send_error_messages:
-                await self.ctx.send.text(
-                    f"语音合成参数错误: {exc}", stream_id,
-                )
-            return {"success": False, "content": str(exc)}
 
     # ─── Command: 由用户手动触发 ─────────────────────────────────────────
 
@@ -899,7 +988,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         "sbv2_tts_command",
         description="将文本转换为日文语音（Style-Bert-VITS2）",
         pattern=r"^/(?:sbv2|voice)\s+(?P<text>.+?)(?:\s+-v\s+(?P<voice>.+))?$",
-        # 与 Tool 同一慢路径预算：翻译上限 30s + 合成默认 60s，宿主默认 60s 不够。
+        # 与扩展同一慢路径预算：翻译上限 30s + 合成默认 60s，宿主默认 60s 不够。
         timeout_ms=120000,
     )
     async def handle_tts_command(
@@ -1035,19 +1124,6 @@ class SBV2TTSPlugin(MaiBotPlugin):
             style="Neutral",
         )
 
-    @staticmethod
-    def _build_echo_text(clean_text: str) -> str:
-        """产出用于语音前回显的整段中文原文（直接去首尾空白）。
-
-        Args:
-            clean_text: 已完成首尾清理的原始中文文本。
-
-        Returns:
-            str: 回显文本；输入为空时返回空串。
-        """
-
-        return (clean_text or "").strip()
-
     async def _send_help(self, stream_id: str) -> None:
         """发送 ``/sbv2 help`` 帮助文本。"""
 
@@ -1063,14 +1139,14 @@ class SBV2TTSPlugin(MaiBotPlugin):
             f"{voice_lines}\n"
             f"当前默认音色：{self.config.voice.default_voice}\n\n"
             "🌐 翻译机制：\n"
-            "插件默认先把中文翻译为日文，再送入本地 Style-Bert-VITS2 推理合成。"
-            "若 translate_to_japanese = false，则跳过翻译。\n\n"
+            "命令默认先把中文翻译为日文，再送入本地 Style-Bert-VITS2 推理合成。"
+            "若 translate_to_japanese = false，则命令跳过翻译（自动回复的日语语音仍会翻译）。\n\n"
             "✂️ 合成方式：\n"
             "每条输入一次性整段翻译并合成为单条语音（不再按标点/标记分句）。"
             "译文长度由 general.max_text_length 约束，若仍超长将由服务端返回 422 错误。\n\n"
-            "🈶 语音前回显中文（可选，默认关闭）：\n"
-            "开启 general.echo_original_text 后，仅 planner 自动发语音(@Tool) 时会在语音前"
-            "先发一条整段中文原文方便阅读；/sbv2 手动命令不回显。\n\n"
+            "🤖 自动回复：\n"
+            "在 reply 的 plugin_options 里选中 sbv2_ja_voice 后，本条回复正文会被朗读为"
+            "日语语音，正文照常发送。\n\n"
             "📌 示例：\n"
             "/sbv2 你好世界\n"
             "/sbv2 今天的天气真不错 -v Fusetsu_v1.5\n"
