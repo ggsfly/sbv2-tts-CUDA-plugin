@@ -30,7 +30,7 @@ LLM 调取规范
   解析；模型无效时 Host 报错，翻译失败如实暴露（不静默回退）。
 """
 
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, cast
 
 import aiohttp
 import asyncio
@@ -267,6 +267,17 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
     config_model = SBV2TTSPluginConfig
 
+    @property
+    def config(self) -> SBV2TTSPluginConfig:
+        """返回强类型配置实例。
+
+        基类 ``MaiBotPlugin.config`` 标注为 ``PluginConfigBase``，静态检查看不到
+        ``general`` / ``translate`` / ``voice`` / ``components`` 各节，这里按实际
+        注入的配置模型收窄返回类型。
+        """
+
+        return cast(SBV2TTSPluginConfig, super().config)
+
     # 可用 LLM 任务名缓存（进程内一次；None=未拉取）。由 _resolve_translate_llm 维护。
     _available_task_names: Optional[frozenset] = None
 
@@ -345,13 +356,15 @@ class SBV2TTSPlugin(MaiBotPlugin):
 
         Args:
             response: 即将执行后处理的回复正文。
-            **kwargs: Host 注入的其余钩子参数（session_id 等，本处理器不使用）。
+            **kwargs: Host 注入的其余钩子参数（``session_id`` / ``reply_message_id`` /
+                ``reply_tool_args`` / ``skip_post_process`` / ``enable_splitter`` /
+                ``enable_chinese_typo``）。宿主把 ``modified_kwargs`` 当作**完整替换**，
+                而非增量合并，因此修改正文时必须原样带回这些键。
 
         Returns:
             Dict[str, Any]: 钩子返回值；正文有变化时通过 modified_kwargs 改写。
         """
 
-        del kwargs
         if not self.config.general.strip_voice_placeholder:
             return {"action": "continue"}
         if not response or "[语音消息]" not in response:
@@ -367,10 +380,10 @@ class SBV2TTSPlugin(MaiBotPlugin):
             # 整条回复只有占位回声：如实暴露为空正文（语音已由工具发出），
             # 由 Host 走"生成可见回复失败"分支，不静默保留占位。
             self.ctx.logger.info("回复正文仅含 [语音消息] 占位回声，已剥离为空")
-            return {"action": "continue", "modified_kwargs": {"response": ""}}
+            return {"action": "continue", "modified_kwargs": {**kwargs, "response": ""}}
 
         self.ctx.logger.info("已剥离回复正文中的 [语音消息] 占位回声")
-        return {"action": "continue", "modified_kwargs": {"response": cleaned}}
+        return {"action": "continue", "modified_kwargs": {**kwargs, "response": cleaned}}
 
     # ─── 内部：连接性探测 ────────────────────────────────────────────────
 
@@ -648,19 +661,19 @@ class SBV2TTSPlugin(MaiBotPlugin):
         if self._available_task_names is None:
             try:
                 names = await self.ctx.llm.get_available_models()
-                self._available_task_names = frozenset(
-                    str(n).strip() for n in names if str(n).strip()
-                )
-                self.ctx.logger.debug(
-                    "已缓存可用 LLM 任务名: %s", sorted(self._available_task_names),
-                )
             except Exception as exc:
                 # 拉取失败不写缓存（保持 None），下次调用重试；本次视为模型名直传。
                 self.ctx.logger.warning(
                     "获取可用 LLM 任务名列表失败 (%s)，translate_model 将按模型名直传 Host",
                     exc,
                 )
-                self._available_task_names = frozenset()
+                return "replyer", raw
+            self._available_task_names = frozenset(
+                str(n).strip() for n in names if str(n).strip()
+            )
+            self.ctx.logger.debug(
+                "已缓存可用 LLM 任务名: %s", sorted(self._available_task_names),
+            )
 
         if raw in self._available_task_names:
             return raw, ""
@@ -778,6 +791,9 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 default="Ling v2",
             ),
         ],
+        # 宿主组件 RPC 默认 60s，而本插件最慢合法路径是「翻译 30s(index_translate
+        # 单次超时上限) + 合成 60s(general.timeout 默认值)」，必须放宽到覆盖两者。
+        timeout_ms=120000,
     )
     async def handle_tts_tool(
         self,
@@ -855,6 +871,8 @@ class SBV2TTSPlugin(MaiBotPlugin):
         "sbv2_tts_command",
         description="将文本转换为日文语音（Style-Bert-VITS2）",
         pattern=r"^/(?:sbv2|voice)\s+(?P<text>.+?)(?:\s+-v\s+(?P<voice>.+))?$",
+        # 与 Tool 同一慢路径预算：翻译上限 30s + 合成默认 60s，宿主默认 60s 不够。
+        timeout_ms=120000,
     )
     async def handle_tts_command(
         self,

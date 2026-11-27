@@ -107,7 +107,11 @@ class TTSBackendBase(ABC):
                 False, "send_custom回调未设置", backend_name=self.backend_name
             )
 
-        await self._send_custom(message_type="voice", content=base64_audio)
+        if not await self._send_custom(message_type="voice", content=base64_audio):
+            logger.error("%s 语音投递失败: send_custom 返回未成功", self.log_prefix)
+            return TTSResult(
+                False, "语音投递失败: 宿主发送层返回未成功", backend_name=self.backend_name
+            )
         logger.info(
             "%s 语音已通过send_custom发送 (base64模式, 音频大小: %d字节%s)",
             self.log_prefix, len(audio_data),

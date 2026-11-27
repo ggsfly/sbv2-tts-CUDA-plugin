@@ -7,6 +7,21 @@ MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推�
 > **v1.2.0 新增**：翻译引擎可切换（`[translate].engine`）——既可继续走宿主 LLM（`host_llm`），也可直连本地部署的 **Index-Translate** 翻译模型（`index_translate`，OpenAI 兼容端点，零 API 成本、低延迟，支持术语表硬约束与风格软约束）。
 >
 > **v1.2.1 调整**：翻译设置归拢至 `[translate]` 节（`translate_to_japanese`、`translate_model` 自 `[general]` 迁入）；配置节按数据流重排（通用 → 翻译 → 合成 → 组件开关），config.toml 生成顺序与 WebUI 显示顺序同步生效；`engine` 字段为 Literal 双值校验，WebUI 渲染为下拉选择。从 1.2.0 升级时由 Runner 自动迁移，跨节迁移的键按默认值处理。
+>
+> **v1.2.2 适配**：适配 MaiBot 1.4.8 / maibot-sdk 2.23.0。修复 `strip_voice_placeholder` 钩子因 `modified_kwargs` 整体替换语义而完全失效（正文占位回声从未被真正剥离）；语音投递失败不再被吞成「成功发送」；`translate_model` 任务名缓存不再因一次拉取失败而永久降级；`Tool` / `Command` 显式声明更宽的组件 RPC 超时；manifest 补齐 `display.icon` 与 `changelog`。详见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
+## 兼容版本
+
+| 项 | 声明区间（manifest） | 本轮验证组合 |
+|---|---|---|
+| MaiBot Host | `host_application`: `1.2.5` ~ `1.99.99` | **1.4.8** |
+| `maibot-plugin-sdk` | `sdk`: `2.8.1` ~ `2.99.99` | **2.23.0** |
+
+- `1.2.5` 是本插件的能力下限：宿主自该版本起支持 `ctx.llm.generate` 的显式 `task_name` / `model_name` 路由，并提供 `maisaka.reply.before_post_process` 钩子。
+- 上界 `1.99.99` / `2.99.99` 保持开放，便于在后续小版本上继续使用；若遇到宿主侧协议变更导致的异常，请以本文档的验证组合为准排查。
+- 加载后用 `/sbv2 help` 自检：能正常回显音色列表即说明配置与组件注册链路正常。
 
 ---
 
@@ -169,6 +184,8 @@ command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command
 
 当 Agent 决定进行日文语音回复时，会自主调用 `sbv2_tts_tool`。可通过 `[components].tool_enabled` 开启或关闭。
 
+该 Tool 属于宿主默认的 `deferred` 工具：首轮上下文只列出工具摘要，模型需要先用 `tool_search` 发现它，再发起调用。这是宿主侧既有的发现机制，无需额外配置。
+
 ---
 
 ## 合成方式：一次性整段合成
@@ -246,6 +263,7 @@ uv run pytest plugins/ggsfly_sbv2-tts-CUDA-plugin/tests/test.py -q
 ```
 ggsfly_sbv2-tts-CUDA-plugin/
 ├── _manifest.json           # 插件 manifest v2 (id: ggsfly.sbv2-tts-cuda-plugin)
+├── CHANGELOG.md             # 更新日志（manifest changelog 指向本文件）
 ├── .gitignore               # 忽略规则（包含 /config.toml）
 ├── config_keys.py           # 配置键常量定义
 ├── plugin.py                # 插件入口（MaiBotPlugin + Tool / Command / Hook，内置配置模型）

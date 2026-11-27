@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import sys
 import types
@@ -546,8 +547,8 @@ class TestManifest:
         """id 必须与留档插件区分，避免 loader 重复拉黑。"""
         assert manifest["id"] == "ggsfly.sbv2-tts-cuda-plugin"
 
-    def test_version_initial(self, manifest: dict):
-        assert manifest["version"] == "1.2.1"
+    def test_version_is_cuda_plugin_release(self, manifest: dict):
+        assert manifest["version"] == "1.2.2"
 
     def test_capabilities_include_required(self, manifest: dict):
         caps = set(manifest.get("capabilities", []))
@@ -560,6 +561,20 @@ class TestManifest:
 
     def test_sdk_range(self, manifest: dict):
         assert manifest["sdk"]["min_version"] == "2.8.1"
+
+    def test_host_min_version_covers_llm_routing_and_hook(self, manifest: dict):
+        """宿主 1.2.5 起才有显式 task_name/model_name 路由与本插件订阅的钩子。"""
+        assert manifest["host_application"]["min_version"] == "1.2.5"
+
+    def test_display_icon_is_lucide(self, manifest: dict):
+        icon = manifest["display"]["icon"]
+        assert icon["type"] == "lucide"
+        assert icon["value"]
+
+    def test_changelog_points_to_existing_file(self, manifest: dict):
+        changelog = manifest["changelog"]
+        assert changelog == "CHANGELOG.md"
+        assert os.path.isfile(os.path.join(PLUGIN_DIR, changelog))
 
 
 # ============================================================
@@ -580,7 +595,8 @@ class TestConfigDefaults:
     def test_max_text_length_still_present(self):
         assert "max_text_length" in GeneralConfig.model_fields
 
-    def test_config_version_bumped(self):
+    def test_config_version_matches_schema(self):
+        """plugin.config_version 跟随配置结构版本，v1.2.2 未改配置结构故保持 1.2.1。"""
         assert PluginSectionConfig().config_version == "1.2.1"
 
     def test_translate_fields_moved_out_of_general(self):
@@ -627,6 +643,131 @@ class TestNoSrcImport:
             source = f.read()
         assert "from src" not in source, "plugin.py 不得 import src.*（SDK 硬约束）"
         assert "import src" not in source, "plugin.py 不得 import src.*（SDK 硬约束）"
+
+
+# ============================================================
+# Hook：宿主把 modified_kwargs 当整体替换，必须原样带回全部入参
+# ============================================================
+
+
+class TestStripVoicePlaceholderHook:
+    """`maisaka.reply.before_post_process` 的回归测试。
+
+    宿主 `hook_dispatcher` 用 `dispatch_result.kwargs = dict(modified_kwargs)`
+    整体替换，而后处理消费方要求 `skip_post_process` / `enable_splitter` /
+    `enable_chinese_typo` 必须是布尔值。钩子若只回传 `response`，剥离会因
+    `TypeError` 被宿主吞掉、退回默认策略，功能等于失效。
+    """
+
+    HOOK_KWARGS: Dict[str, Any] = {
+        "session_id": "sess-1",
+        "reply_message_id": "msg-1",
+        "reply_tool_args": {"foo": "bar"},
+        "skip_post_process": False,
+        "enable_splitter": True,
+        "enable_chinese_typo": True,
+    }
+
+    def _plugin(self) -> Any:
+        plugin = SBV2TTSPlugin()
+        plugin.set_plugin_config({})
+        plugin._set_context(
+            types.SimpleNamespace(logger=logging.getLogger("test.sbv2_plugin"))
+        )
+        return plugin
+
+    def test_strip_keeps_all_host_kwargs(self):
+        result = _run(
+            self._plugin().strip_voice_placeholder(
+                response="[语音消息]你好呀", **self.HOOK_KWARGS
+            )
+        )
+
+        assert result["action"] == "continue"
+        modified = result["modified_kwargs"]
+        assert modified["response"] == "你好呀"
+        assert set(modified) == {"response", *self.HOOK_KWARGS}
+        assert modified["skip_post_process"] is False
+        assert modified["enable_splitter"] is True
+        assert modified["enable_chinese_typo"] is True
+        assert modified["reply_tool_args"] == {"foo": "bar"}
+
+    def test_strip_to_empty_keeps_all_host_kwargs(self):
+        result = _run(
+            self._plugin().strip_voice_placeholder(
+                response="[语音消息]", **self.HOOK_KWARGS
+            )
+        )
+
+        assert result["modified_kwargs"]["response"] == ""
+        assert set(result["modified_kwargs"]) == {"response", *self.HOOK_KWARGS}
+
+    def test_no_placeholder_returns_plain_continue(self):
+        result = _run(
+            self._plugin().strip_voice_placeholder(response="你好呀", **self.HOOK_KWARGS)
+        )
+
+        assert result == {"action": "continue"}
+
+
+# ============================================================
+# 语音投递结果必须如实传播（不得吞成「成功发送」）
+# ============================================================
+
+
+class TestSendAudioResultPropagation:
+    def _backend(self, send_ok: bool) -> Any:
+        backend = VoiceBackend(lambda key, default=None: default, log_prefix="[test]")
+
+        async def _send_custom(message_type: str, content: Any, **kwargs: Any) -> bool:
+            del message_type, content, kwargs
+            return send_ok
+
+        backend.set_send_custom(_send_custom)
+        return backend
+
+    def test_success_returns_success_result(self):
+        result = _run(
+            self._backend(True).send_audio(b"RIFF" + b"x" * 1024, voice_info="Ling v2")
+        )
+        assert result.success is True
+
+    def test_failure_is_not_swallowed(self):
+        result = _run(
+            self._backend(False).send_audio(b"RIFF" + b"x" * 1024, voice_info="Ling v2")
+        )
+        assert result.success is False
+        assert "投递失败" in result.message
+
+
+# ============================================================
+# LLM 任务名缓存：拉取失败不得写缓存
+# ============================================================
+
+
+class TestTranslateLlmTaskCache:
+    def test_failed_lookup_is_not_cached(self):
+        plugin = SBV2TTSPlugin()
+        config_data = SBV2TTSPlugin.build_default_config()
+        config_data["translate"]["translate_model"] = "utils"
+        plugin.set_plugin_config(config_data)
+        attempts = {"n": 0}
+
+        class _FailingLlm:
+            async def get_available_models(self) -> List[str]:
+                attempts["n"] += 1
+                raise RuntimeError("boom")
+
+        plugin._set_context(
+            types.SimpleNamespace(
+                logger=logging.getLogger("test.sbv2_llm"), llm=_FailingLlm()
+            )
+        )
+
+        assert _run(plugin._resolve_translate_llm()) == ("replyer", "utils")
+        assert _run(plugin._resolve_translate_llm()) == ("replyer", "utils")
+        assert attempts["n"] == 2, "拉取失败不应写缓存，下一次调用必须重试"
+        assert plugin._available_task_names is None
 
 
 if __name__ == "__main__":
