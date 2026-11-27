@@ -7,6 +7,7 @@
 ### 主要功能与修复
 
 - **[tool] 修复 reasoning planner 调不动本插件 Tool**：宿主 1.4.x 的工具可见性默认是 `deferred`，此时插件工具不进入请求的原生 `tools` 数组，只能经 `tool_search` 发现且参数 schema 不出站，模型发不出带参调用——表现为 `/sbv2` 指令正常但 planner 永远不调用 `sbv2_tts_tool`。现显式声明 `visibility="visible"`。
+- **[tool] 返回值对齐官方文档**：`sbv2_tts_tool` 的结果文字改用 `content` 键（原为 `message`）。宿主 `component_query.py:657` 会回退读 `message`，行为等价，但文档约定用 `content`，且失败时该字段同时作为错误信息。
 - **[hook] 修复 `strip_voice_placeholder` 完全失效**：`maisaka.reply.before_post_process` 的 `modified_kwargs` 在宿主侧是**整体替换**而非增量合并（`src/plugin_runtime/host/hook_dispatcher.py`），原实现只回传 `response` 一个键，导致 `skip_post_process` / `enable_splitter` / `enable_chinese_typo` 丢失，宿主读取布尔值时抛错并降级为默认策略，剥离从未真正生效。现改为回传 `{**kwargs, "response": ...}`。
 - **[send] 语音投递失败不再被吞掉**：`TTSBackendBase.send_audio` 原先把 `send.custom` 的返回布尔值丢弃，宿主拒发时仍返回成功并回显「成功发送语音」。现在检查返回值，失败时返回失败 `TTSResult` 并如实暴露给聊天流。
 - **[component] 组件开关改用完全限定名并如实暴露结果**：`on_load` / `on_config_update` 统一走 `plugin_id.component_name`，宿主返回 `{"success": false}` 时记录错误而不是记「已禁用」；配置里改 `tool_enabled` / `command_enabled` 现即时生效。因加入了启用方向，`capabilities` 补齐 `component.enable`（宿主按声明逐项授权，缺一即被拒）。

@@ -836,21 +836,23 @@ class SBV2TTSPlugin(MaiBotPlugin):
             **kwargs: 兼容其它 Host 注入字段。
 
         Returns:
-            Dict[str, Any]: ``{"success": bool, "message": str}``。
+            Dict[str, Any]: ``{"success": bool, "content": str}``——`content` 是给模型
+            阅读的结果文字（宿主 `component_query.py:657` 优先读 `content`，
+            `success=False` 时同时作为错误信息）。
         """
 
         del kwargs
         log_prefix = f"[sbv2_tts_plugin][tool][{stream_id}]"
 
         if not stream_id:
-            return {"success": False, "message": "缺少 stream_id，无法发送"}
+            return {"success": False, "content": "缺少 stream_id，无法发送"}
 
         try:
             profile = self._resolve_voice(voice)
         except ValueError as exc:
             if self.config.general.send_error_messages:
                 await self.ctx.send.text(str(exc), stream_id)
-            return {"success": False, "message": str(exc)}
+            return {"success": False, "content": str(exc)}
 
         try:
             result = await self._run_pipeline(
@@ -860,7 +862,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 voice=profile,
                 echo_enabled=True,
             )
-            return {"success": result.success, "message": result.message}
+            return {"success": result.success, "content": result.message}
         except asyncio.TimeoutError:
             timeout_sec = self.config.general.timeout
             self.ctx.logger.error(
@@ -870,7 +872,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 await self.ctx.send.text(
                     f"语音合成超时（{timeout_sec}s）", stream_id,
                 )
-            return {"success": False, "message": "timeout"}
+            return {"success": False, "content": "timeout"}
         except (aiohttp.ClientError, ConnectionError) as exc:
             self.ctx.logger.error(
                 "%s TTS Tool 网络错误: %s", log_prefix, exc,
@@ -879,7 +881,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 await self.ctx.send.text(
                     f"语音合成网络错误: {type(exc).__name__}", stream_id,
                 )
-            return {"success": False, "message": str(exc)}
+            return {"success": False, "content": str(exc)}
         except (KeyError, AttributeError, ValueError) as exc:
             self.ctx.logger.error(
                 "%s TTS Tool 参数错误: %s", log_prefix, exc, exc_info=True,
@@ -888,7 +890,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 await self.ctx.send.text(
                     f"语音合成参数错误: {exc}", stream_id,
                 )
-            return {"success": False, "message": str(exc)}
+            return {"success": False, "content": str(exc)}
 
     # ─── Command: 由用户手动触发 ─────────────────────────────────────────
 

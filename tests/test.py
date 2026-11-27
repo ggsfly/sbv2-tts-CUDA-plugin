@@ -806,6 +806,29 @@ class TestToolVisibility:
         assert self._tool_metadata().get("timeout_ms") == 120000
 
 
+class TestToolResultShape:
+    """官方文档要求把给模型阅读的文字放在 `content`。"""
+
+    def _plugin(self) -> Any:
+        plugin = SBV2TTSPlugin()
+        plugin.set_plugin_config(SBV2TTSPlugin.build_default_config())
+        plugin._set_context(
+            types.SimpleNamespace(
+                plugin_id="ggsfly.sbv2-tts-cuda-plugin",
+                logger=logging.getLogger("test.sbv2_tool_result"),
+            )
+        )
+        return plugin
+
+    def test_missing_stream_id_returns_content_key(self):
+        result = _run(self._plugin().handle_tts_tool(text="你好"))
+
+        assert result["success"] is False
+        assert "content" in result
+        assert "message" not in result
+        assert "stream_id" in result["content"]
+
+
 # ============================================================
 # 组件开关：完全限定名 + 失败如实暴露
 # ============================================================
