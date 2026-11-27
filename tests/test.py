@@ -562,6 +562,11 @@ class TestManifest:
     def test_sdk_range(self, manifest: dict):
         assert manifest["sdk"]["min_version"] == "2.8.1"
 
+    def test_version_ranges_are_pinned_to_verified_family(self, manifest: dict):
+        """上界钉在当前已验证的大版本族，避免跨大版本被动放行。"""
+        assert manifest["host_application"]["max_version"] == "1.4.99"
+        assert manifest["sdk"]["max_version"] == "2.23.99"
+
     def test_host_min_version_covers_llm_routing_and_hook(self, manifest: dict):
         """宿主 1.2.5 起才有显式 task_name/model_name 路由与本插件订阅的钩子。"""
         assert manifest["host_application"]["min_version"] == "1.2.5"
@@ -768,6 +773,80 @@ class TestTranslateLlmTaskCache:
         assert _run(plugin._resolve_translate_llm()) == ("replyer", "utils")
         assert attempts["n"] == 2, "拉取失败不应写缓存，下一次调用必须重试"
         assert plugin._available_task_names is None
+
+
+# ============================================================
+# Tool 可见性：reasoning planner 只把 visibility=visible 的插件工具放进原生 tools
+# ============================================================
+
+
+class TestToolVisibility:
+    """宿主 `_get_tool_visibility` 未声明时默认 `deferred`，planner 调不动本工具。"""
+
+    def _tool_metadata(self) -> Dict[str, Any]:
+        plugin = SBV2TTSPlugin()
+        plugin.set_plugin_config(SBV2TTSPlugin.build_default_config())
+        for component in plugin.get_components():
+            if component["type"] == "TOOL":
+                return component.get("metadata") or {}
+        raise AssertionError("未注册 TOOL 组件")
+
+    def test_tool_declares_native_visibility(self):
+        assert self._tool_metadata().get("visibility") == "visible"
+
+    def test_tool_carries_component_rpc_timeout(self):
+        assert self._tool_metadata().get("timeout_ms") == 120000
+
+
+# ============================================================
+# 组件开关：完全限定名 + 失败如实暴露
+# ============================================================
+
+
+class TestComponentSwitches:
+    PLUGIN_ID = "ggsfly.sbv2-tts-cuda-plugin"
+
+    class _Recorder:
+        def __init__(self, result: Any) -> None:
+            self.calls: List[Tuple[str, str, str]] = []
+            self._result = result
+
+        async def enable_component(self, name: str, component_type: str) -> Any:
+            self.calls.append(("enable", name, component_type))
+            return self._result
+
+        async def disable_component(self, name: str, component_type: str) -> Any:
+            self.calls.append(("disable", name, component_type))
+            return self._result
+
+    def _plugin(self, recorder: Any, tool_enabled: bool = True) -> Any:
+        plugin = SBV2TTSPlugin()
+        config_data = SBV2TTSPlugin.build_default_config()
+        config_data["components"]["tool_enabled"] = tool_enabled
+        plugin.set_plugin_config(config_data)
+        plugin._set_context(
+            types.SimpleNamespace(
+                plugin_id=self.PLUGIN_ID,
+                logger=logging.getLogger("test.sbv2_components"),
+                component=recorder,
+            )
+        )
+        return plugin
+
+    def test_uses_fully_qualified_component_names(self):
+        recorder = self._Recorder({"success": True})
+        _run(self._plugin(recorder)._sync_component_switches())
+
+        assert recorder.calls == [
+            ("enable", f"{self.PLUGIN_ID}.sbv2_tts_tool", "TOOL"),
+            ("enable", f"{self.PLUGIN_ID}.sbv2_tts_command", "COMMAND"),
+        ]
+
+    def test_disabled_tool_is_turned_off(self):
+        recorder = self._Recorder({"success": True})
+        _run(self._plugin(recorder, tool_enabled=False)._sync_component_switches())
+
+        assert ("disable", f"{self.PLUGIN_ID}.sbv2_tts_tool", "TOOL") in recorder.calls
 
 
 if __name__ == "__main__":

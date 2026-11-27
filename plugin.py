@@ -289,7 +289,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         1. 短超时探测 Style-Bert-VITS2 服务存活（GET /models/info）。
         2. 若翻译引擎为 index_translate，短超时探测其 OpenAI 兼容端点
            （GET {base_url}/models）。
-        3. 按 ``[components]`` 配置禁用 Tool / Command 组件。
+        3. 按 ``[components]`` 配置同步 Tool / Command 组件开关。
         4. 不阻断插件加载：未连通只发 warning。
         """
 
@@ -298,19 +298,7 @@ class SBV2TTSPlugin(MaiBotPlugin):
         if self.config.translate.engine == "index_translate":
             await self._probe_translate_service()
 
-        if not self.config.components.tool_enabled:
-            await self.ctx.component.disable_component(
-                name="sbv2_tts_tool",
-                component_type="TOOL",
-            )
-            self.ctx.logger.info("SBV2 Tool 组件已按配置禁用")
-
-        if not self.config.components.command_enabled:
-            await self.ctx.component.disable_component(
-                name="sbv2_tts_command",
-                component_type="COMMAND",
-            )
-            self.ctx.logger.info("SBV2 Command 组件已按配置禁用")
+        await self._sync_component_switches()
 
         self.ctx.logger.info(
             "Style-Bert-VITS2 日文 TTS 插件已加载，已注册后端=%s",
@@ -330,11 +318,44 @@ class SBV2TTSPlugin(MaiBotPlugin):
         config_data: Dict[str, Any],
         version: str,
     ) -> None:
-        """配置热更新回调。"""
+        """配置热更新回调：按新的 ``[components]`` 开关同步组件状态。"""
 
         del scope
         del config_data
         self.ctx.logger.info("SBV2 插件配置已更新: version=%s", version)
+        await self._sync_component_switches()
+
+    async def _sync_component_switches(self) -> None:
+        """按 ``[components]`` 配置启用/禁用 Tool 与 Command 组件。
+
+        组件用 ``plugin_id.component_name`` 完全限定名定位，避免与其他插件重名；
+        宿主返回 ``{"success": bool, "error": str}``，失败时如实记录，不假装已生效。
+        """
+
+        switches: Tuple[Tuple[str, str, bool], ...] = (
+            ("sbv2_tts_tool", "TOOL", self.config.components.tool_enabled),
+            ("sbv2_tts_command", "COMMAND", self.config.components.command_enabled),
+        )
+
+        for short_name, component_type, enabled in switches:
+            full_name = f"{self.ctx.plugin_id}.{short_name}"
+            toggle = (
+                self.ctx.component.enable_component
+                if enabled
+                else self.ctx.component.disable_component
+            )
+            result = await toggle(full_name, component_type)
+            if result is True or (isinstance(result, dict) and bool(result.get("success"))):
+                self.ctx.logger.info(
+                    "组件状态已同步: %s (%s) -> %s",
+                    full_name, component_type, "启用" if enabled else "禁用",
+                )
+                continue
+            detail = result.get("error") if isinstance(result, dict) else result
+            self.ctx.logger.error(
+                "组件状态同步失败: %s (%s) -> %s, 原因=%s",
+                full_name, component_type, "启用" if enabled else "禁用", detail,
+            )
 
     # ─── Hook：剥离回复正文中的语音占位回声 ──────────────────────────────
 
@@ -791,6 +812,10 @@ class SBV2TTSPlugin(MaiBotPlugin):
                 default="Ling v2",
             ),
         ],
+        # 宿主 1.4.x 的 reasoning planner 只把 visibility=visible 的插件工具放进原生
+        # tools 数组；未声明时默认 deferred，只能经 tool_search 发现且参数 schema 不出站，
+        # 实测表现为 planner 永远调不动本工具（指令 /sbv2 走 Command 链路，不受影响）。
+        visibility="visible",
         # 宿主组件 RPC 默认 60s，而本插件最慢合法路径是「翻译 30s(index_translate
         # 单次超时上限) + 合成 60s(general.timeout 默认值)」，必须放宽到覆盖两者。
         timeout_ms=120000,

@@ -8,7 +8,7 @@ MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推�
 >
 > **v1.2.1 调整**：翻译设置归拢至 `[translate]` 节（`translate_to_japanese`、`translate_model` 自 `[general]` 迁入）；配置节按数据流重排（通用 → 翻译 → 合成 → 组件开关），config.toml 生成顺序与 WebUI 显示顺序同步生效；`engine` 字段为 Literal 双值校验，WebUI 渲染为下拉选择。从 1.2.0 升级时由 Runner 自动迁移，跨节迁移的键按默认值处理。
 >
-> **v1.2.2 适配**：适配 MaiBot 1.4.8 / maibot-sdk 2.23.0。修复 `strip_voice_placeholder` 钩子因 `modified_kwargs` 整体替换语义而完全失效（正文占位回声从未被真正剥离）；语音投递失败不再被吞成「成功发送」；`translate_model` 任务名缓存不再因一次拉取失败而永久降级；`Tool` / `Command` 显式声明更宽的组件 RPC 超时；manifest 补齐 `display.icon` 与 `changelog`。详见 [CHANGELOG.md](CHANGELOG.md)。
+> **v1.2.2 适配**：适配 MaiBot 1.4.8 / maibot-sdk 2.23.0。**修复 reasoning planner 调不动本插件 Tool 的问题**（宿主 1.4.x 只把 `visibility=visible` 的插件工具放进原生 tools 数组，未声明时默认 `deferred`，指令 `/sbv2` 走 Command 链路不受影响）；修复 `strip_voice_placeholder` 钩子因 `modified_kwargs` 整体替换语义而完全失效（正文占位回声从未被真正剥离）；语音投递失败不再被吞成「成功发送」；`translate_model` 任务名缓存不再因一次拉取失败而永久降级；组件开关改用完全限定名并如实暴露失败；`Tool` / `Command` 显式声明更宽的组件 RPC 超时；manifest 补齐 `display.icon` 与 `changelog` 并按官方文档钉住版本区间。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -16,12 +16,12 @@ MaiBot 的文本转语音插件，调用本地 **Style-Bert-VITS2 (CUDA)** 推�
 
 | 项 | 声明区间（manifest） | 本轮验证组合 |
 |---|---|---|
-| MaiBot Host | `host_application`: `1.2.5` ~ `1.99.99` | **1.4.8** |
-| `maibot-plugin-sdk` | `sdk`: `2.8.1` ~ `2.99.99` | **2.23.0** |
+| MaiBot Host | `host_application`: `1.2.5` ~ `1.4.99` | **1.4.8** |
+| `maibot-plugin-sdk` | `sdk`: `2.8.1` ~ `2.23.99` | **2.23.0** |
 
 - `1.2.5` 是本插件的能力下限：宿主自该版本起支持 `ctx.llm.generate` 的显式 `task_name` / `model_name` 路由，并提供 `maisaka.reply.before_post_process` 钩子。
-- 上界 `1.99.99` / `2.99.99` 保持开放，便于在后续小版本上继续使用；若遇到宿主侧协议变更导致的异常，请以本文档的验证组合为准排查。
-- 加载后用 `/sbv2 help` 自检：能正常回显音色列表即说明配置与组件注册链路正常。
+- 上界钉在当前已验证的大版本族（Host `1.4.x` / SDK `2.23.x`）。宿主升到更新版本时不会被拒载，而是以兼容模式加载并给出「插件声明的最高支持版本」警告，提醒重新验证后再放宽声明，而不是静默放行到未知协议上。
+- 加载后用 `/sbv2 help` 自检 Command 链路；planner 侧自检方式是让 Agent 触发一次「用日文语音回复」，日志里应出现 `sbv2_tts_tool` 调用记录。
 
 ---
 
@@ -182,9 +182,9 @@ command_enabled = true            # 用户手动 /sbv2 命令（sbv2_tts_command
 
 ### 自动触发（LLM Agent 规划）
 
-当 Agent 决定进行日文语音回复时，会自主调用 `sbv2_tts_tool`。可通过 `[components].tool_enabled` 开启或关闭。
+当 Agent 决定进行日文语音回复时，会自主调用 `sbv2_tts_tool`。可通过 `[components].tool_enabled` 开启或关闭，改动保存后即时生效（组件开关按完全限定名同步）。
 
-该 Tool 属于宿主默认的 `deferred` 工具：首轮上下文只列出工具摘要，模型需要先用 `tool_search` 发现它，再发起调用。这是宿主侧既有的发现机制，无需额外配置。
+本工具声明为 `visibility="visible"`：宿主 1.4.x 的 reasoning planner 只把原生可见的插件工具放进请求的 tools 数组，默认 `deferred` 的工具仅能经 `tool_search` 发现且参数 schema 不出站，模型发不出带参调用——那正是此前「指令能用、planner 调不动」的原因。
 
 ---
 
