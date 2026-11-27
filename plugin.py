@@ -106,7 +106,7 @@ class PluginSectionConfig(PluginConfigBase):
 
 
 class GeneralConfig(PluginConfigBase):
-    """通用配置。"""
+    """合成超时、译文长度与回复处理。"""
 
     __ui_label__ = "通用"
     __ui_icon__ = "settings"
@@ -115,6 +115,10 @@ class GeneralConfig(PluginConfigBase):
     timeout: int = Field(
         default=60,
         description="Style-Bert-VITS2 推理服务（/voice）请求超时（秒）；翻译请求超时见 [translate].timeout",
+        json_schema_extra={
+            "label": "合成超时（秒）",
+            "hint": "单次 /voice 请求的等待上限。本地 CUDA 合成长句会变慢，超时就调大。",
+        },
     )
     max_text_length: int = Field(
         default=100,
@@ -123,6 +127,14 @@ class GeneralConfig(PluginConfigBase):
             "对齐 Style-Bert-VITS2 服务端 limit（默认 100）。超长不再自动截断，"
             "由后端如实返回 422 错误。"
         ),
+        json_schema_extra={
+            "label": "译文长度上限（字符）",
+            "hint": (
+                "只写进翻译提示词，让模型自己控制长度。不截断、不做本地预检，"
+                "也不会改动 SVB2 服务端的 limit——那边通常会返回 422。"
+                "建议填成与服务端 limit 相同的值。"
+            ),
+        },
     )
     strip_voice_placeholder: bool = Field(
         default=True,
@@ -131,12 +143,23 @@ class GeneralConfig(PluginConfigBase):
             "本插件发送语音后，聊天历史会把语音渲染为 [语音消息]，replyer 偶尔会模仿该占位并写进回复正文，"
             "形成一条无意义的引用消息。开启后通过 maisaka.reply.before_post_process 钩子剥离。"
         ),
+        json_schema_extra={
+            "label": "剥离 [语音消息] 占位回声",
+            "hint": "开着就行。发过语音后 replyer 可能把 [语音消息] 学进正文，这里把它剥掉。",
+        },
     )
-    send_error_messages: bool = Field(default=True, description="是否向聊天流回显错误提示")
+    send_error_messages: bool = Field(
+        default=True,
+        description="是否向聊天流回显错误提示",
+        json_schema_extra={
+            "label": "命令失败时回显错误",
+            "hint": "只影响 /sbv2 命令。自动回复路线失败时固定发一条「本次未附加日语语音」提示，不受此开关控制。",
+        },
+    )
 
 
 class ComponentsConfig(PluginConfigBase):
-    """组件开关。"""
+    """自动回复扩展与命令开关。"""
 
     __ui_label__ = "组件"
     __ui_icon__ = "blocks"
@@ -148,12 +171,26 @@ class ComponentsConfig(PluginConfigBase):
             "是否允许 planner 在 reply 的 plugin_options 里选择 sbv2_ja_voice 扩展。"
             "关闭后扩展仍注册，但被禁用，模型看不到该选项；/sbv2 命令不受影响。"
         ),
+        json_schema_extra={
+            "label": "自动回复语音扩展",
+            "hint": (
+                "自动语音总开关。开启后 planner 可自主选择本扩展，把回复正文读成日文语音；"
+                "关闭后只是模型看不到该选项，/sbv2 命令照常可用。"
+            ),
+        },
     )
-    command_enabled: bool = Field(default=True, description="是否启用 Command 组件")
+    command_enabled: bool = Field(
+        default=True,
+        description="是否启用 Command 组件",
+        json_schema_extra={
+            "label": "斜杠命令",
+            "hint": "是否启用 /sbv2 与 /voice 命令。",
+        },
+    )
 
 
 class VoiceConfig(PluginConfigBase):
-    """Style-Bert-VITS2 推理服务配置。"""
+    """推理服务地址与音色。"""
 
     __ui_label__ = "音色"
     __ui_icon__ = "mic"
@@ -162,17 +199,39 @@ class VoiceConfig(PluginConfigBase):
     api_url: str = Field(
         default="http://127.0.0.1:5000/voice",
         description="Style-Bert-VITS2 API 地址，需指向 /voice 端点",
+        json_schema_extra={
+            "label": "推理服务地址",
+            "hint": "必须指向 /voice 端点。服务未启动时插件加载只发 warning，不会阻断。",
+        },
     )
-    default_voice: str = Field(default="Ling v2", description="默认音色名（取自 voices 列表）")
-    length: float = Field(default=1.0, description="语速，基准 1.0，越大越慢")
+    default_voice: str = Field(
+        default="Ling v2",
+        description="默认音色名（取自 voices 列表）",
+        json_schema_extra={
+            "label": "默认音色",
+            "hint": "必须出现在下面的可选音色列表里，否则不传 -v 时会报未知音色。",
+        },
+    )
+    length: float = Field(
+        default=1.0,
+        description="语速，基准 1.0，越大越慢",
+        json_schema_extra={
+            "label": "语速",
+            "hint": "1.0 为基准，数值越大念得越慢。",
+        },
+    )
     voices: List[str] = Field(
         default_factory=lambda: ["Ling v2", "Fusetsu_v1.5"],
         description="可选音色列表；-v 参数与 default_voice 从该列表按名称匹配",
+        json_schema_extra={
+            "label": "可选音色列表",
+            "hint": "/sbv2 的 -v 参数与自动回复的音色参数都只能从这里选，未命中会如实报错并列出可选值。",
+        },
     )
 
 
 class TranslateConfig(PluginConfigBase):
-    """翻译配置（中→日；v1.2.0 起支持本地 Index-Translate 引擎，v1.2.1 起归拢本节）。"""
+    """中→日翻译，仅作用于 /sbv2、/voice 命令；自动回复路线始终翻译，不受本节开关影响。"""
 
     __ui_label__ = "翻译"
     __ui_icon__ = "languages"
@@ -184,6 +243,14 @@ class TranslateConfig(PluginConfigBase):
             "命令路线是否免翻译：关闭后 /sbv2 把清理后的原文直接交给 language=JP 的后端合成；"
             "自动回复的日语语音扩展始终走中译日引擎，不受本开关影响"
         ),
+        json_schema_extra={
+            "label": "命令路线翻译开关",
+            "hint": (
+                "关掉后 /sbv2 会把中文原样交给日语后端，通常念成乱码——除非你本来就要发日文。"
+                "自动回复路线永远翻译，不读这个开关。"
+            ),
+            "group": "总开关与引擎",
+        },
     )
     engine: Literal["host_llm", "index_translate"] = Field(
         default="host_llm",
@@ -193,11 +260,13 @@ class TranslateConfig(PluginConfigBase):
             "需自行部署 llama-server，见 README）。其他值在加载校验时直接报错。"
         ),
         json_schema_extra={
+            "label": "翻译引擎",
             "hint": (
-                "index_translate 引擎零 API 成本、延迟低（本机 2B 模型约 0.3~0.6 秒/条）；"
-                "base_url 指向 http://127.0.0.1:8020/v1（llama-server 默认端口 8020，"
-                "避开 MaiBot 消息服务器的 8000）。"
+                "index_translate 零 API 成本、延迟低（本机 2B 模型约 0.3~0.6 秒/条）；"
+                "host_llm 借用宿主大模型，不需要额外部署。"
+                "选定后只有对应分组里的字段生效，另一组会被忽略。"
             ),
+            "group": "总开关与引擎",
         },
     )
     translate_model: str = Field(
@@ -211,20 +280,49 @@ class TranslateConfig(PluginConfigBase):
             "模型无效时翻译失败如实暴露。"
         ),
         json_schema_extra={
+            "label": "翻译模型",
             "hint": (
-                "可填任务名（replyer/utils/planner 等）或模型的 name（如 "
-                "gemini-3.7-flash-low，须与 model_config.toml 里 [[models]].name 一模一样）。"
-                "留空使用 replyer 任务。翻译是小任务，推荐 utils 或快速小模型。"
+                "填任务名（replyer/utils/planner 等）或模型的 name（须与 model_config.toml 里 "
+                "[[models]].name 完全一致）。留空 = replyer 任务。翻译是小任务，推荐 utils 或快速小模型。"
             ),
+            "group": "宿主 LLM 引擎（host_llm）",
         },
     )
     base_url: str = Field(
         default="http://127.0.0.1:8020/v1",
         description="（仅 index_translate 引擎）OpenAI 兼容端点根地址，不带末尾斜杠",
+        json_schema_extra={
+            "label": "端点地址",
+            "hint": "llama-server 的 OpenAI 兼容根地址，不带末尾斜杠。默认端口 8020，避开消息服务器的 8000。",
+            "group": "本地 Index-Translate 引擎（index_translate）",
+        },
     )
     model: str = Field(
         default="Index-Translate-2B",
         description="（仅 index_translate 引擎）模型名，与 llama-server --alias 一致",
+        json_schema_extra={
+            "label": "模型名",
+            "hint": "必须与启动 llama-server 时的 --alias 完全一致。",
+            "group": "本地 Index-Translate 引擎（index_translate）",
+        },
+    )
+    timeout: int = Field(
+        default=30,
+        description="（仅 index_translate 引擎）单次翻译请求超时（秒）",
+        json_schema_extra={
+            "label": "翻译超时（秒）",
+            "hint": "这里的超时只管翻译请求，和「通用」里的合成超时是两个独立设置。",
+            "group": "本地 Index-Translate 引擎（index_translate）",
+        },
+    )
+    max_tokens: int = Field(
+        default=512,
+        description="（仅 index_translate 引擎）生成 token 上限；官方短台词建议 512",
+        json_schema_extra={
+            "label": "生成 token 上限",
+            "hint": "官方短台词建议 512。设太小会截断译文，表现为译文不完整。",
+            "group": "本地 Index-Translate 引擎（index_translate）",
+        },
     )
     style: str = Field(
         default="",
@@ -233,6 +331,16 @@ class TranslateConfig(PluginConfigBase):
             "如：保持口语化、自然的直播说话风格，保留语气词与情绪，使用女性口吻。"
             "留空 = 无约束直译"
         ),
+        json_schema_extra={
+            "label": "文风软约束",
+            "hint": (
+                "写进 prompt 的风格要求，如「保持口语化、自然的直播说话风格，保留语气词与情绪」。"
+                "留空 = 无约束直译。"
+            ),
+            "group": "本地 Index-Translate 引擎（index_translate）",
+            "x-widget": "textarea",
+            "rows": 2,
+        },
     )
     glossary: List[str] = Field(
         default_factory=list,
@@ -240,14 +348,11 @@ class TranslateConfig(PluginConfigBase):
             "（仅 index_translate 引擎）术语表硬约束，每条形如 '中文→日本語'，"
             "如 '苦力怕→クリーパー'；多条时全部进 prompt【硬性要求】"
         ),
-    )
-    timeout: int = Field(
-        default=30,
-        description="（仅 index_translate 引擎）单次翻译请求超时（秒）",
-    )
-    max_tokens: int = Field(
-        default=512,
-        description="（仅 index_translate 引擎）生成 token 上限；官方短台词建议 512",
+        json_schema_extra={
+            "label": "术语表硬约束",
+            "hint": "每条形如「中文→日本語」，如「苦力怕→クリーパー」。人名、专有名词保真靠这个。",
+            "group": "本地 Index-Translate 引擎（index_translate）",
+        },
     )
 
 
